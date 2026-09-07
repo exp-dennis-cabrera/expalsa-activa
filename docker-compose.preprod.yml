@@ -5,6 +5,8 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    ports:
+      - "192.168.0.89:5432:5432"
 
     environment:
       POSTGRES_DB: ${DB_NAME:-cmms_preprod}
@@ -140,4 +142,5 @@ volumes:
   minio_data:
   caddy_data:
   caddy_config:
+
 
