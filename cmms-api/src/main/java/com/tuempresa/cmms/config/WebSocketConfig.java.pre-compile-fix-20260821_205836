@@ -1,0 +1,383 @@
+package com.tuempresa.cmms.config;
+
+import com.tuempresa.cmms.security.CustomUserDetailsService;
+import com.tuempresa.cmms.security.JwtTokenProvider;
+
+import lombok.RequiredArgsConstructor;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Configuration;
+
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageChannel;
+import org.springframework.messaging.MessageDeliveryException;
+import org.springframework.messaging.simp.config.ChannelRegistration;
+import org.springframework.messaging.simp.config.MessageBrokerRegistry;
+import org.springframework.messaging.simp.stomp.StompCommand;
+import org.springframework.messaging.simp.stomp.StompHeaderAccessor;
+import org.springframework.messaging.support.ChannelInterceptor;
+import org.springframework.messaging.support.MessageHeaderAccessor;
+
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.userdetails.UserDetails;
+
+import org.springframework.web.socket.config.annotation.EnableWebSocketMessageBroker;
+import org.springframework.web.socket.config.annotation.StompEndpointRegistry;
+import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerConfigurer;
+
+import java.security.Principal;
+
+@Configuration
+@EnableWebSocketMessageBroker
+@RequiredArgsConstructor
+public class WebSocketConfig
+    implements WebSocketMessageBrokerConfigurer {
+
+    private static final Logger log =
+        LoggerFactory.getLogger(WebSocketConfig.class);
+
+    private final JwtTokenProvider jwtTokenProvider;
+    private final CustomUserDetailsService userDetailsService;
+
+    @Value("${cors.allowed-origin}")
+    private String frontendUrl;
+
+
+    // ========================================================
+    // BROKER
+    // ========================================================
+
+    @Override
+    public void configureMessageBroker(
+        MessageBrokerRegistry config
+    ) {
+
+        /*
+         * /notifications:
+         *   destinos privados existentes.
+         *
+         * /ot:
+         *   telemetria OT server -> browser.
+         */
+        config.enableSimpleBroker(
+            "/notifications",
+            "/ot"
+        );
+
+        config.setApplicationDestinationPrefixes(
+            "/app"
+        );
+
+        config.setUserDestinationPrefix(
+            "/user"
+        );
+    }
+
+
+    // ========================================================
+    // HANDSHAKE
+    //
+    // El handshake HTTP debe poder ocurrir sin Authorization
+    // porque SockJS no permite controlar ese header de forma
+    // fiable desde el navegador.
+    //
+    // La autenticacion REAL ocurre inmediatamente despues,
+    // durante STOMP CONNECT.
+    // ========================================================
+
+    @Override
+    public void registerStompEndpoints(
+        StompEndpointRegistry registry
+    ) {
+
+        registry
+            .addEndpoint("/ws")
+            .setAllowedOrigins(frontendUrl)
+            .withSockJS();
+    }
+
+
+    // ========================================================
+    // STOMP SECURITY
+    // ========================================================
+
+    @Override
+    public void configureClientInboundChannel(
+        ChannelRegistration registration
+    ) {
+
+        registration.interceptors(
+            new ChannelInterceptor() {
+
+                @Override
+                public Message<?> preSend(
+                    Message<?> message,
+                    MessageChannel channel
+                ) {
+
+                    StompHeaderAccessor accessor =
+                        MessageHeaderAccessor.getAccessor(
+                            message,
+                            StompHeaderAccessor.class
+                        );
+
+                    if (
+                        accessor == null
+                        || accessor.getCommand() == null
+                    ) {
+                        return message;
+                    }
+
+                    StompCommand command =
+                        accessor.getCommand();
+
+                    if (StompCommand.CONNECT.equals(command)) {
+
+                        authenticate(accessor);
+
+                        return message;
+                    }
+
+                    /*
+                     * Desde este punto toda accion STOMP
+                     * requiere una sesion autenticada.
+                     */
+                    Principal principal =
+                        accessor.getUser();
+
+                    if (principal == null) {
+                        throw new MessageDeliveryException(
+                            "STOMP session not authenticated"
+                        );
+                    }
+
+                    if (StompCommand.SUBSCRIBE.equals(command)) {
+
+                        authorizeSubscription(
+                            accessor,
+                            principal
+                        );
+
+                        return message;
+                    }
+
+                    /*
+                     * Nuestra arquitectura realtime es
+                     * exclusivamente server -> browser.
+                     *
+                     * El navegador NO necesita publicar nada.
+                     */
+                    if (StompCommand.SEND.equals(command)) {
+                        throw new MessageDeliveryException(
+                            "STOMP client SEND is not permitted"
+                        );
+                    }
+
+                    return message;
+                }
+            }
+        );
+    }
+
+
+    // ========================================================
+    // AUTHENTICATION
+    // ========================================================
+
+    private void authenticate(
+        StompHeaderAccessor accessor
+    ) {
+
+        String token =
+            accessor.getFirstNativeHeader("token");
+
+        /*
+         * Tambien aceptamos el formato estandar por si
+         * posteriormente migramos el frontend.
+         */
+        if (token == null || token.isBlank()) {
+
+            String authorization =
+                accessor.getFirstNativeHeader(
+                    "Authorization"
+                );
+
+            if (
+                authorization != null
+                && authorization.startsWith("Bearer ")
+            ) {
+                token =
+                    authorization.substring(7);
+            }
+        }
+
+        if (token == null || token.isBlank()) {
+            throw new MessageDeliveryException(
+                "Missing STOMP authentication token"
+            );
+        }
+
+        try {
+
+            if (!jwtTokenProvider.isValid(token)) {
+                throw new MessageDeliveryException(
+                    "Invalid or expired STOMP token"
+                );
+            }
+
+            if (
+                !"access".equals(
+                    jwtTokenProvider.getTokenType(token)
+                )
+            ) {
+                throw new MessageDeliveryException(
+                    "Invalid STOMP token type"
+                );
+            }
+
+            Long userId =
+                jwtTokenProvider.getUserId(token);
+
+            UserDetails userDetails =
+                userDetailsService.loadUserById(
+                    userId
+                );
+
+            UsernamePasswordAuthenticationToken auth =
+                new UsernamePasswordAuthenticationToken(
+                    userDetails,
+                    null,
+                    userDetails.getAuthorities()
+                );
+
+            /*
+             * Este Principal queda asociado a toda la
+             * sesion WebSocket.
+             *
+             * auth.getName() == email del usuario.
+             *
+             * Eso permite que convertAndSendToUser(email,...)
+             * funcione correctamente.
+             */
+            accessor.setUser(auth);
+
+            log.info(
+                "STOMP authenticated user={}",
+                auth.getName()
+            );
+
+        } catch (MessageDeliveryException ex) {
+            throw ex;
+
+        } catch (Exception ex) {
+
+            throw new MessageDeliveryException(
+                "STOMP authentication failed",
+                ex
+            );
+        }
+    }
+
+
+    // ========================================================
+    // SUBSCRIPTION AUTHORIZATION
+    // ========================================================
+
+    private void authorizeSubscription(
+        StompHeaderAccessor accessor,
+        Principal principal
+    ) {
+
+        String destination =
+            accessor.getDestination();
+
+        if (
+            destination == null
+            || destination.isBlank()
+        ) {
+            throw new MessageDeliveryException(
+                "Missing STOMP destination"
+            );
+        }
+
+        /*
+         * Notificaciones privadas.
+         *
+         * El cliente se suscribe a:
+         *
+         *   /user/notifications
+         *
+         * Spring resuelve internamente el usuario.
+         */
+        if (
+            "/user/notifications".equals(
+                destination
+            )
+        ) {
+            return;
+        }
+
+        /*
+         * Primera fase OT:
+         * solo administradores.
+         *
+         * Posteriormente se reemplazara por
+         * PermissionEntity.OT_MONITORING.
+         */
+        if (
+            "/ot/ice/live".equals(destination)
+        ) {
+
+            if (!canViewOt(principal)) {
+
+                log.warn(
+                    "STOMP OT subscription denied user={}",
+                    principal.getName()
+                );
+
+                throw new MessageDeliveryException(
+                    "OT monitoring permission denied"
+                );
+            }
+
+            return;
+        }
+
+        /*
+         * Fail closed.
+         *
+         * No permitimos subscribirse a destinos arbitrarios.
+         */
+        throw new MessageDeliveryException(
+            "STOMP subscription not permitted: "
+            + destination
+        );
+    }
+
+
+    private boolean canViewOt(
+        Principal principal
+    ) {
+
+        if (!(principal instanceof Authentication auth)) {
+            return false;
+        }
+
+        return auth
+            .getAuthorities()
+            .stream()
+            .anyMatch(authority -> {
+
+                String value =
+                    authority.getAuthority();
+
+                return
+                    "ROLE_ADMIN".equals(value)
+                    || "ROLE_LIMITED_ADMIN".equals(value);
+            });
+    }
+}

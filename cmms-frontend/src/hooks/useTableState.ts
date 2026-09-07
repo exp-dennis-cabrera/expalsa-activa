@@ -1,0 +1,94 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { SortingState, PaginationState, ColumnOrderState, ColumnSizingState, VisibilityState, OnChangeFn } from '@tanstack/react-table';
+import useTableStatePersist from './useTableStatePersist';
+
+export interface TableStateReturn {
+  sorting: SortingState;
+  setSorting: OnChangeFn<SortingState>;
+  pagination: PaginationState;
+  setPagination: OnChangeFn<PaginationState>;
+  columnOrder: ColumnOrderState;
+  setColumnOrder: OnChangeFn<ColumnOrderState>;
+  columnSizing: ColumnSizingState;
+  setColumnSizing: OnChangeFn<ColumnSizingState>;
+  columnVisibility: VisibilityState;
+  setColumnVisibility: OnChangeFn<VisibilityState>;
+  pinnedColumns: string[];
+  setPinnedColumns: (pinnedColumns: string[]) => void;
+}
+
+interface UseTableStateProps {
+  prefix: string;
+  initialSorting?: SortingState;
+  initialPagination?: PaginationState;
+  persistPageIndex?: boolean;
+}
+
+// Copia fiel de useTableState.ts real: mantiene el estado de la tabla
+// (orden/tamano/visibilidad de columnas, columnas ancladas, ordenamiento,
+// paginacion), restaurandolo de localStorage al montar, y persistiendolo
+// automaticamente en cada cambio (via useTableStatePersist).
+export default function useTableState({
+  prefix,
+  initialSorting = [],
+  initialPagination = { pageIndex: 0, pageSize: 10 },
+  persistPageIndex = false,
+}: UseTableStateProps): TableStateReturn {
+  const stateItem = `${prefix}TableState`;
+  const hasRestoredRef = useRef(false);
+
+  const [sorting, setSortingState] = useState<SortingState>(initialSorting);
+  const [pagination, setPaginationState] = useState<PaginationState>(initialPagination);
+  const [columnOrder, setColumnOrderState] = useState<ColumnOrderState>([]);
+  const [columnSizing, setColumnSizingState] = useState<ColumnSizingState>({});
+  const [columnVisibility, setColumnVisibilityState] = useState<VisibilityState>({});
+  const [pinnedColumns, setPinnedColumnsState] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (typeof localStorage === 'undefined' || hasRestoredRef.current) return;
+    const savedState = localStorage.getItem(stateItem);
+    if (!savedState) {
+      hasRestoredRef.current = true;
+      return;
+    }
+    try {
+      const state = JSON.parse(savedState);
+      if (state.sorting?.length > 0) setSortingState(state.sorting);
+      setPaginationState({
+        pageIndex: persistPageIndex ? (state.pagination?.pageIndex ?? initialPagination.pageIndex) : initialPagination.pageIndex,
+        pageSize: state.pageSize ?? initialPagination.pageSize,
+      });
+      if (state.columnOrder?.length > 0) setColumnOrderState(state.columnOrder);
+      if (state.columnSizing && Object.keys(state.columnSizing).length > 0) setColumnSizingState(state.columnSizing);
+      if (state.columnVisibility && Object.keys(state.columnVisibility).length > 0) setColumnVisibilityState(state.columnVisibility);
+      if (Array.isArray(state.pinnedColumns)) setPinnedColumnsState(state.pinnedColumns);
+      hasRestoredRef.current = true;
+    } catch {
+      hasRestoredRef.current = true;
+    }
+  }, [stateItem, persistPageIndex, initialPagination.pageIndex, initialPagination.pageSize]);
+
+  const setSorting = useCallback<OnChangeFn<SortingState>>((updater) => setSortingState(updater), []);
+  const setPagination = useCallback<OnChangeFn<PaginationState>>((updater) => setPaginationState(updater), []);
+  const setColumnOrder = useCallback<OnChangeFn<ColumnOrderState>>((updater) => setColumnOrderState(updater), []);
+  const setColumnSizing = useCallback<OnChangeFn<ColumnSizingState>>((updater) => setColumnSizingState(updater), []);
+  const setColumnVisibility = useCallback<OnChangeFn<VisibilityState>>((updater) => setColumnVisibilityState(updater), []);
+  const setPinnedColumns = useCallback((next: string[]) => setPinnedColumnsState(next), []);
+
+  useTableStatePersist({ prefix, sorting, columnOrder, columnSizing, columnVisibility, pagination, pinnedColumns, persistPageIndex });
+
+  return {
+    sorting,
+    setSorting,
+    pagination,
+    setPagination,
+    columnOrder,
+    setColumnOrder,
+    columnSizing,
+    setColumnSizing,
+    columnVisibility,
+    setColumnVisibility,
+    pinnedColumns,
+    setPinnedColumns,
+  };
+}

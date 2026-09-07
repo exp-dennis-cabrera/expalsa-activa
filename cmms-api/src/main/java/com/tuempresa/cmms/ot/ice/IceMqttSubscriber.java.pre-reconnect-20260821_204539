@@ -1,0 +1,264 @@
+package com.tuempresa.cmms.ot.ice;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
+
+import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
+import org.eclipse.paho.client.mqttv3.MqttAsyncClient;
+import org.eclipse.paho.client.mqttv3.MqttCallback;
+import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
+import org.eclipse.paho.client.mqttv3.MqttMessage;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+@Component
+public class IceMqttSubscriber
+    implements MqttCallback {
+
+    private static final Logger log =
+        LoggerFactory.getLogger(
+            IceMqttSubscriber.class
+        );
+
+    private final ObjectMapper objectMapper;
+    private final IceLiveStateService stateService;
+
+    @Value("${OT_MQTT_ENABLED:false}")
+    private boolean enabled;
+
+    @Value("${OT_MQTT_BROKER:tcp://127.0.0.1:1883}")
+    private String broker;
+
+    @Value("${OT_MQTT_USERNAME:}")
+    private String username;
+
+    @Value("${OT_MQTT_PASSWORD_FILE:}")
+    private String passwordFile;
+
+    @Value("${OT_MQTT_CLIENT_ID:expalsa-activa-ice-live-01}")
+    private String clientId;
+
+    @Value("${OT_MQTT_TOPIC:expalsa/ot/pesaje/hielo/+/telemetry/weight}")
+    private String topic;
+
+    private MqttAsyncClient client;
+
+    public IceMqttSubscriber(
+        ObjectMapper objectMapper,
+        IceLiveStateService stateService
+    ) {
+        this.objectMapper = objectMapper;
+        this.stateService = stateService;
+    }
+
+    @PostConstruct
+    public void start() {
+
+        if (!enabled) {
+            log.info(
+                "OT MQTT live subscriber disabled"
+            );
+            return;
+        }
+
+        try {
+
+            String password =
+                Files.readString(
+                    Path.of(passwordFile),
+                    StandardCharsets.UTF_8
+                ).trim();
+
+            client = new MqttAsyncClient(
+                broker,
+                clientId
+            );
+
+            client.setCallback(this);
+
+            MqttConnectOptions options =
+                new MqttConnectOptions();
+
+            options.setMqttVersion(
+                MqttConnectOptions.MQTT_VERSION_3_1_1
+            );
+
+            options.setUserName(username);
+
+            options.setPassword(
+                password.toCharArray()
+            );
+
+            options.setAutomaticReconnect(true);
+            options.setCleanSession(true);
+            options.setConnectionTimeout(10);
+            options.setKeepAliveInterval(30);
+
+            log.info(
+                "OT MQTT connecting broker={} clientId={}",
+                broker,
+                clientId
+            );
+
+            client.connect(
+                options,
+                null,
+                new org.eclipse.paho.client.mqttv3.IMqttActionListener() {
+
+                    @Override
+                    public void onSuccess(
+                        org.eclipse.paho.client.mqttv3.IMqttToken token
+                    ) {
+                        subscribe();
+                    }
+
+                    @Override
+                    public void onFailure(
+                        org.eclipse.paho.client.mqttv3.IMqttToken token,
+                        Throwable exception
+                    ) {
+                        log.error(
+                            "OT MQTT initial connection failed",
+                            exception
+                        );
+                    }
+                }
+            );
+
+        } catch (Exception ex) {
+
+            log.error(
+                "OT MQTT startup failed",
+                ex
+            );
+        }
+    }
+
+    private void subscribe() {
+
+        try {
+
+            client.subscribe(
+                topic,
+                1
+            );
+
+            log.info(
+                "OT MQTT connected and subscribed topic={} qos=1",
+                topic
+            );
+
+        } catch (Exception ex) {
+
+            log.error(
+                "OT MQTT subscribe failed",
+                ex
+            );
+        }
+    }
+
+    @Override
+    public void connectionLost(
+        Throwable cause
+    ) {
+
+        log.warn(
+            "OT MQTT connection lost; automatic reconnect enabled: {}",
+            cause != null
+                ? cause.getMessage()
+                : "unknown"
+        );
+    }
+
+    @Override
+    public void messageArrived(
+        String topic,
+        MqttMessage mqttMessage
+    ) {
+
+        try {
+
+            IceLiveMessage message =
+                objectMapper.readValue(
+                    mqttMessage.getPayload(),
+                    IceLiveMessage.class
+                );
+
+            stateService.update(message);
+
+            log.info(
+                "ICE LIVE asset={} weight_kg={} weight_lb={} target_lb={} state={} quality={} read_ms={}",
+                message.getAssetKey(),
+                String.format(
+                    "%.3f",
+                    message.getWeightKg()
+                ),
+                String.format(
+                    "%.3f",
+                    message.getWeightLb()
+                ),
+                String.format(
+                    "%.3f",
+                    message.getTargetWeightLb()
+                ),
+                message.getDetectorState(),
+                message.getQualityCode(),
+                message.getCollectionDurationMs()
+            );
+
+        } catch (Exception ex) {
+
+            log.error(
+                "OT MQTT invalid payload topic={}",
+                topic,
+                ex
+            );
+        }
+    }
+
+    @Override
+    public void deliveryComplete(
+        IMqttDeliveryToken token
+    ) {
+        /*
+         * Nunca publica.
+         * Este cliente MQTT es exclusivamente subscriber.
+         */
+    }
+
+    @PreDestroy
+    public void stop() {
+
+        if (client == null) {
+            return;
+        }
+
+        try {
+
+            if (client.isConnected()) {
+                client.disconnect().waitForCompletion(
+                    3000
+                );
+            }
+
+            client.close();
+
+        } catch (Exception ex) {
+
+            log.warn(
+                "OT MQTT shutdown warning: {}",
+                ex.getMessage()
+            );
+        }
+    }
+}

@@ -1,0 +1,53 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/cmms_dev
+    username: cmms_user
+    password: cmms_pwd
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  mail:
+    host: ${SMTP_HOST:smtp.gmail.com}
+    port: ${SMTP_PORT:587}
+    username: ${SMTP_USERNAME:}
+    password: ${SMTP_PASSWORD:}
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+
+jwt:
+  secret: ${JWT_SECRET_KEY:dev-secret-change-in-prod-min-32-chars}
+  access-token-expiration: 1800000     # 30 min
+  refresh-token-expiration: 604800000  # 7 dias
+
+cors:
+  allowed-origin: http://localhost:3000
+
+storage:
+  type: minio
+  endpoint: http://localhost:9000
+  bucket: cmms-dev
+  access-key: ${MINIO_ACCESS_KEY:minioadmin}
+  secret-key: ${MINIO_SECRET_KEY:minioadmin}
+
+mail:
+  enabled: ${MAIL_ENABLED:false}
+  type: ${MAIL_TYPE:SMTP}
+  from: ${MAIL_FROM:no-reply@micmms.local}
+  from-name: ${MAIL_FROM_NAME:Mi CMMS}
+
+sendgrid:
+  api-key: ${SENDGRID_API_KEY:}
+
+ai:
+  enabled: ${AI_ENABLED:true}
+  ollama:
+    base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+    model: ${OLLAMA_MODEL:qwen2.5:7b}
+
+logging:
+  level:
+    com.tuempresa.cmms: DEBUG

@@ -1,0 +1,71 @@
+spring:
+  datasource:
+    url: ${DATABASE_URL}
+    username: ${DATABASE_USERNAME}
+    password: ${DATABASE_PASSWORD}
+  jpa:
+    properties:
+      hibernate:
+        session:
+          events:
+            log:
+              # Umbral del registro de consultas lentas (milisegundos).
+              LOG_QUERIES_SLOWER_THAN_MS: 1000
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  mail:
+    host: ${SMTP_HOST:smtp.sendgrid.net}
+    port: ${SMTP_PORT:587}
+    username: ${SMTP_USERNAME:apikey}
+    password: ${SMTP_PASSWORD:}
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+
+jwt:
+  secret: ${JWT_SECRET_KEY}
+  access-token-expiration: 1800000
+  refresh-token-expiration: 604800000
+
+cors:
+  allowed-origin: ${PUBLIC_FRONT_URL}
+
+frontend:
+  url: ${PUBLIC_FRONT_URL}
+
+storage:
+  type: ${STORAGE_TYPE:minio}
+  endpoint: ${STORAGE_ENDPOINT}
+  # Direccion publica de MinIO, la que ve el navegador. Sin esto, las URLs
+  # de imagenes salen con el nombre interno de Docker ("http://minio:9000")
+  # y el navegador no puede resolverlo.
+  public-endpoint: ${PUBLIC_MINIO_ENDPOINT:}
+  bucket: ${STORAGE_BUCKET}
+  access-key: ${STORAGE_ACCESS_KEY}
+  secret-key: ${STORAGE_SECRET_KEY}
+
+mail:
+  enabled: ${MAIL_ENABLED:true}
+  type: ${MAIL_TYPE:SENDGRID}
+  from: ${MAIL_FROM}
+  from-name: ${MAIL_FROM_NAME:Mi CMMS}
+
+sendgrid:
+  api-key: ${SENDGRID_API_KEY:}
+
+ai:
+  enabled: ${AI_ENABLED:false}
+  ollama:
+    base-url: ${OLLAMA_BASE_URL:http://ollama:11434}
+    model: ${OLLAMA_MODEL:qwen2.5:7b}
+
+logging:
+  level:
+    com.tuempresa.cmms: INFO
+    # Diagnostico: registra las consultas que tarden mas de 1 segundo, con
+    # su tiempo exacto. Sirve para ubicar el cuello de botella sin adivinar.
+    org.hibernate.SQL_SLOW: info
