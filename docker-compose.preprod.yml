@@ -40,7 +40,7 @@ services:
 
 
   backend:
-    image: expalsa-activa-backend:ot-dashboard-preprod-20260824-01
+    image: expalsa-activa-backend:ot-preflight-preprod-20260907
     restart: unless-stopped
 
     environment:
@@ -140,3 +140,4 @@ volumes:
   minio_data:
   caddy_data:
   caddy_config:
+

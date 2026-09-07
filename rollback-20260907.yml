@@ -1,0 +1,7 @@
+# Vuelta atras al estado previo al despliegue del 2026-09-07.
+#   docker compose -f docker-compose.preprod.yml -f rollback-20260907.yml up -d
+services:
+  backend:
+    image: expalsa-activa-backend:ot-dashboard-preprod-20260824-01
+  frontend:
+    image: expalsa-activa-frontend:ice-v34-ui-state-preprod-20260828-04
