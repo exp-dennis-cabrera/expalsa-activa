@@ -58,25 +58,11 @@ export default function LoginPage() {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        bgcolor: 'secondary.main',
+        background: 'linear-gradient(160deg, #0f1b3d 0%, #23306b 55%, #3d4ea8 100%)',
         p: 3,
       }}
     >
-      <Paper
-        elevation={0}
-        sx={{
-          p: 5,
-          width: '100%',
-          maxWidth: 400,
-          borderRadius: 3,
-          bgcolor: 'background.paper',
-          border: '1px solid',
-          borderColor: 'secondary.main',
-          borderTop: '4px solid',
-          borderTopColor: 'secondary.main',
-          boxShadow: '0 12px 32px rgba(15, 27, 61, 0.10)',
-        }}
-      >
+      <Paper sx={{ p: 5, width: '100%', maxWidth: 400, borderRadius: 3 }}>
         <Box sx={{ display: 'flex', justifyContent: 'center', mb: 3 }}>
           <Box
             component="img"
@@ -97,27 +83,7 @@ export default function LoginPage() {
               </Typography>
             </Box>
 
-            <Box
-                component="form"
-                onSubmit={handleSubmit}
-                sx={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 2,
-                  '& .MuiFilledInput-root': {
-                    borderColor: 'secondary.main',
-                  },
-                  '& .MuiFilledInput-root:hover': {
-                    borderColor: 'secondary.main',
-                  },
-                  '& .MuiFilledInput-root.Mui-focused': {
-                    borderColor: 'secondary.main',
-                  },
-                  '& .MuiInputLabel-root.Mui-focused': {
-                    color: 'secondary.main',
-                  },
-                }}
-              >
+            <Box component="form" onSubmit={handleSubmit} sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
               <TextField
                 label="Correo"
                 type="email"
@@ -138,27 +104,11 @@ export default function LoginPage() {
 
               {error && <Alert severity="error">{error}</Alert>}
 
-              <Button
-                type="submit"
-                variant="contained"
-                color="secondary"
-                size="large"
-                disabled={loading}
-                fullWidth
-              >
+              <Button type="submit" variant="contained" size="large" disabled={loading} fullWidth>
                 {loading ? 'Ingresando…' : 'Ingresar'}
               </Button>
 
-              <Link
-                component={RouterLink}
-                to="/forgot-password"
-                variant="body2"
-                sx={{
-                  textAlign: 'center',
-                  mt: 1,
-                  color: 'secondary.main',
-                }}
-              >
+              <Link component={RouterLink} to="/forgot-password" variant="body2" sx={{ textAlign: 'center', mt: 1 }}>
                 Olvidé mi contraseña
               </Link>
             </Box>
@@ -175,27 +125,7 @@ export default function LoginPage() {
               </Typography>
             </Box>
 
-            <Box
-                component="form"
-                onSubmit={handleVerifyMfa}
-                sx={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 2,
-                  '& .MuiFilledInput-root': {
-                    borderColor: 'secondary.main',
-                  },
-                  '& .MuiFilledInput-root:hover': {
-                    borderColor: 'secondary.main',
-                  },
-                  '& .MuiFilledInput-root.Mui-focused': {
-                    borderColor: 'secondary.main',
-                  },
-                  '& .MuiInputLabel-root.Mui-focused': {
-                    color: 'secondary.main',
-                  },
-                }}
-              >
+            <Box component="form" onSubmit={handleVerifyMfa} sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
               <TextField
                 label="Código de 6 dígitos"
                 value={mfaCode}
@@ -208,20 +138,12 @@ export default function LoginPage() {
 
               {error && <Alert severity="error">{error}</Alert>}
 
-              <Button
-                type="submit"
-                variant="contained"
-                color="secondary"
-                size="large"
-                disabled={loading}
-                fullWidth
-              >
+              <Button type="submit" variant="contained" size="large" disabled={loading} fullWidth>
                 {loading ? 'Verificando…' : 'Verificar'}
               </Button>
 
               <Button
                 variant="text"
-                color="secondary"
                 onClick={() => {
                   setMfaChallengeToken(null);
                   setMfaCode('');

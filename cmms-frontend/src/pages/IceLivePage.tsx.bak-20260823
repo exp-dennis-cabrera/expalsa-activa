@@ -14,7 +14,8 @@ import WifiOffTwoToneIcon from '@mui/icons-material/WifiOffTwoTone';
 import AcUnitTwoToneIcon from '@mui/icons-material/AcUnitTwoTone';
 import Inventory2TwoToneIcon from '@mui/icons-material/Inventory2TwoTone';
 
-import type { IMessage } from '@stomp/stompjs';
+import SockJS from 'sockjs-client';
+import { Client, type IMessage } from '@stomp/stompjs';
 
 import {
   CartesianGrid,
@@ -28,9 +29,10 @@ import {
 } from 'recharts';
 
 import { useAuth } from '../context/AuthContext';
-import { api, getErrorMessage } from '../api/client';
-import { useRealtime, useRealtimeSubscription } from '../realtime/RealtimeContext';
 import IceProcessTwin from '../components/ice/IceProcessTwin';
+
+const API_BASE_URL =
+  import.meta.env.VITE_API_URL || 'http://localhost:8080';
 
 const TARGET_ASSET =
   'lat-silo-hielo-01-scale-01';
@@ -38,34 +40,19 @@ const TARGET_ASSET =
 const STALE_AFTER_MS = 12000;
 
 /*
- * Estado exclusivamente visual.
- *
- * No detecta ciclos.
- * No modifica MQTT.
- * No modifica KPIs.
- * No sustituye V3.4.
- *
- * BAG_CONFIRMED solamente puede originarse
- * desde un event/bag productivo.
+ * Una conexión ya ONLINE que deja de entregar
+ * telemetría debe recuperarse rápido.
  */
-const BAG_CONFIRMED_UI_MS = 1500;
+const TELEMETRY_RECOVERY_AFTER_MS = 20000;
 
-type UiProcessState =
-  | 'MONITORING_WEIGHT'
-  | 'BAG_CONFIRMED';
+/*
+ * El handshake inicial SockJS/STOMP puede necesitar
+ * más tiempo. No debemos abortarlo a los mismos
+ * 8 segundos usados para detectar telemetría perdida.
+ */
+const STOMP_CONNECT_TIMEOUT_MS = 15000;
 
-function processStateLabel(
-  state: UiProcessState
-): string {
-  switch (state) {
-    case 'BAG_CONFIRMED':
-      return 'Saco registrado';
-
-    case 'MONITORING_WEIGHT':
-    default:
-      return 'Peso en vivo';
-  }
-}
+const DESTROY_CLIENT_TIMEOUT_MS = 1500;
 
 /*
  * DEMO únicamente de frontend.
@@ -85,16 +72,8 @@ const DEMO_FINAL_WEIGHTS = [
 ];
 
 type RawIceMessage = {
-  type?: string;
-
   asset_key?: string;
   assetKey?: string;
-
-  event_id?: string;
-  eventId?: string;
-
-  removed_at?: string;
-  removedAt?: string;
 
   weight_kg?: number;
   weightKg?: number;
@@ -128,58 +107,6 @@ type IceLiveData = {
   receivedAt: number;
 };
 
-type IceBagData = {
-  assetKey: string;
-  eventId: string;
-  removedAt: string;
-  weightKg: number;
-  weightLb: number;
-  targetWeightLb: number | null;
-  qualityCode: number | null;
-  receivedAt: number;
-};
-
-type IceDashboardResponse = {
-  asOf: string;
-  assetKey: string;
-  production: {
-    bagsToday: number;
-    averageWeightLb: number | null;
-    totalWeightLb: number;
-    targetWeightLb: number | null;
-  };
-  recentBags: Array<{
-    eventId: string;
-  }>;
-};
-
-type IceProductionState =
-  IceDashboardResponse['production'];
-
-function applyBagToProduction(
-  current: IceProductionState,
-  bag: IceBagData
-): IceProductionState {
-  const bagsToday =
-    current.bagsToday + 1;
-
-  const totalWeightLb =
-    current.totalWeightLb +
-    bag.weightLb;
-
-  return {
-    bagsToday,
-    totalWeightLb,
-    averageWeightLb:
-      bagsToday > 0
-        ? totalWeightLb / bagsToday
-        : null,
-    targetWeightLb:
-      current.targetWeightLb ??
-      bag.targetWeightLb,
-  };
-}
-
 type WeightPoint = {
   ts: number;
   weightLb: number;
@@ -211,20 +138,6 @@ function firstNumber(
 function normalizeMessage(
   raw: RawIceMessage
 ): IceLiveData | null {
-  /*
-   * Compatibilidad:
-   * - mensajes nuevos: type = weight
-   * - mensajes anteriores sin type: permitidos
-   *
-   * Un event/bag nunca modifica Peso actual.
-   */
-  if (
-    raw.type !== undefined &&
-    raw.type !== 'weight'
-  ) {
-    return null;
-  }
-
   const assetKey =
     raw.asset_key ??
     raw.assetKey;
@@ -288,75 +201,6 @@ function normalizeMessage(
   };
 }
 
-function normalizeBagMessage(
-  raw: RawIceMessage
-): IceBagData | null {
-  if (raw.type !== 'bag') {
-    return null;
-  }
-
-  const assetKey =
-    raw.asset_key ??
-    raw.assetKey;
-
-  const eventId =
-    raw.event_id ??
-    raw.eventId;
-
-  const removedAt =
-    raw.removed_at ??
-    raw.removedAt;
-
-  const weightKg =
-    firstNumber(
-      raw.weight_kg,
-      raw.weightKg
-    );
-
-  const weightLb =
-    firstNumber(
-      raw.weight_lb,
-      raw.weightLb
-    );
-
-  const targetWeightLb =
-    firstNumber(
-      raw.target_weight_lb,
-      raw.targetWeightLb,
-      raw.targetLb
-    ) ?? null;
-
-  const qualityCode =
-    firstNumber(
-      raw.quality_code,
-      raw.qualityCode
-    ) ?? null;
-
-  if (
-    !assetKey ||
-    !eventId ||
-    !removedAt ||
-    weightKg === undefined ||
-    weightLb === undefined ||
-    weightKg < 0 ||
-    weightLb < 0
-  ) {
-    return null;
-  }
-
-  return {
-    assetKey,
-    eventId,
-    removedAt,
-    weightKg,
-    weightLb,
-    targetWeightLb,
-    qualityCode,
-    receivedAt: Date.now(),
-  };
-}
-
-
 function detectorLabel(
   state: string
 ): string {
@@ -401,20 +245,6 @@ function parseMessage(
     return null;
   }
 }
-
-function parseBagMessage(
-  message: IMessage
-): IceBagData | null {
-  try {
-    const raw =
-      JSON.parse(message.body) as RawIceMessage;
-
-    return normalizeBagMessage(raw);
-  } catch {
-    return null;
-  }
-}
-
 
 function buildSessionEvent(
   data: IceLiveData,
@@ -668,35 +498,12 @@ export default function IceLivePage() {
         ).get('demo') === '1',
       []
     );
-const [data, setData] =
+
+  const clientRef =
+    useRef<Client | null>(null);
+
+  const [data, setData] =
     useState<IceLiveData | null>(null);
-
-  const [lastBag, setLastBag] =
-    useState<IceBagData | null>(null);
-
-  /*
-   * Estado visual productivo.
-   *
-   * NO se alimenta de telemetry.detector_state:
-   * ese campo permanece como diagnóstico V1.
-   */
-  const [uiProcessState, setUiProcessState] =
-    useState<UiProcessState>(
-      'MONITORING_WEIGHT'
-    );
-
-  const [production, setProduction] =
-    useState<IceProductionState | null>(null);
-
-  const [productionError, setProductionError] =
-    useState<string | null>(null);
-
-  /*
-   * Estado síncrono para evitar una carrera entre
-   * commit de React y llegada de un event/bag STOMP.
-   */
-  const productionRef =
-    useRef<IceProductionState | null>(null);
 
   const [connected, setConnected] =
     useState(false);
@@ -716,190 +523,9 @@ const [data, setData] =
   const previousDetectorStateRef =
     useRef<string | null>(null);
 
-  /*
-   * MQTT QoS 1 permite redelivery.
-   * eventId identifica un saco físico.
-   */
-  const seenBagEventIdsRef =
-    useRef<Set<string>>(new Set());
-
-  const historicalBaselineReadyRef =
-    useRef(false);
-
-  const pendingLiveBagsRef =
-    useRef<Map<string, IceBagData>>(
-      new Map()
-    );
-
   const authorized =
     role === 'ADMIN' ||
     role === 'LIMITED_ADMIN';
-
-
-  /*
-   * Snapshot canónico al entrar.
-   * No polling.
-   */
-  useEffect(() => {
-    if (!authorized || demoMode) {
-      historicalBaselineReadyRef.current =
-        false;
-
-      productionRef.current =
-        null;
-
-      pendingLiveBagsRef.current.clear();
-
-      setProduction(null);
-      setProductionError(null);
-
-      return;
-    }
-
-    const controller =
-      new AbortController();
-
-    historicalBaselineReadyRef.current =
-      false;
-
-    productionRef.current =
-      null;
-
-    pendingLiveBagsRef.current.clear();
-    seenBagEventIdsRef.current.clear();
-
-    setProduction(null);
-    setProductionError(null);
-
-    void api
-      .get<IceDashboardResponse>(
-        `/ot/ice/assets/${TARGET_ASSET}/dashboard`,
-        controller.signal
-      )
-      .then((dashboard) => {
-        if (controller.signal.aborted) {
-          return;
-        }
-
-        if (
-          dashboard.assetKey !==
-          TARGET_ASSET
-        ) {
-          throw new Error(
-            'El histórico OT respondió para otro activo.'
-          );
-        }
-
-        const source =
-          dashboard.production;
-
-        if (
-          !source ||
-          !Number.isFinite(source.bagsToday) ||
-          !Number.isFinite(source.totalWeightLb)
-        ) {
-          throw new Error(
-            'El histórico OT devolvió KPIs inválidos.'
-          );
-        }
-
-        const historicalIds =
-          new Set(
-            (dashboard.recentBags ?? [])
-              .map((bag) => bag.eventId)
-              .filter(Boolean)
-          );
-
-        const seen =
-          seenBagEventIdsRef.current;
-
-        for (const eventId of historicalIds) {
-          seen.add(eventId);
-        }
-
-        let nextProduction:
-          IceProductionState = {
-            bagsToday:
-              source.bagsToday,
-            averageWeightLb:
-              source.averageWeightLb,
-            totalWeightLb:
-              source.totalWeightLb,
-            targetWeightLb:
-              source.targetWeightLb,
-          };
-
-        /*
-         * Incorporar eventos STOMP recibidos mientras
-         * el GET estaba en vuelo únicamente si el
-         * snapshot no los contenía.
-         */
-        for (
-          const [eventId, bag]
-          of pendingLiveBagsRef.current
-        ) {
-          if (historicalIds.has(eventId)) {
-            continue;
-          }
-
-          nextProduction =
-            applyBagToProduction(
-              nextProduction,
-              bag
-            );
-        }
-
-        pendingLiveBagsRef.current.clear();
-
-        /*
-         * Primero actualizamos el ref síncrono.
-         * Después React.
-         * Solo finalmente habilitamos incrementos live.
-         */
-        productionRef.current =
-          nextProduction;
-
-        setProduction(
-          nextProduction
-        );
-
-        historicalBaselineReadyRef.current =
-          true;
-      })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted) {
-          return;
-        }
-
-        historicalBaselineReadyRef.current =
-          false;
-
-        productionRef.current =
-          null;
-
-        setProductionError(
-          getErrorMessage(
-            error,
-            'No se pudo cargar la producción histórica.'
-          )
-        );
-      });
-
-    return () => {
-      controller.abort();
-
-      historicalBaselineReadyRef.current =
-        false;
-
-      productionRef.current =
-        null;
-
-      pendingLiveBagsRef.current.clear();
-    };
-  }, [
-    authorized,
-    demoMode,
-  ]);
 
   useEffect(() => {
     const timer =
@@ -911,42 +537,6 @@ const [data, setData] =
     return () =>
       window.clearInterval(timer);
   }, []);
-
-  /*
-   * Después de un event/bag mostramos
-   * "Saco registrado" durante 1.5 s.
-   *
-   * Es únicamente presentación.
-   */
-  useEffect(() => {
-    if (
-      demoMode ||
-      uiProcessState !==
-        'BAG_CONFIRMED'
-    ) {
-      return;
-    }
-
-    const timer =
-      window.setTimeout(
-        () => {
-          setUiProcessState(
-            (current) =>
-              current ===
-              'BAG_CONFIRMED'
-                ? 'MONITORING_WEIGHT'
-                : current
-          );
-        },
-        BAG_CONFIRMED_UI_MS
-      );
-
-    return () =>
-      window.clearTimeout(timer);
-  }, [
-    demoMode,
-    uiProcessState,
-  ]);
 
   useEffect(() => {
     if (
@@ -1076,253 +666,567 @@ const [data, setData] =
   ]);
 
 
-  /*
-   * Transporte realtime GLOBAL.
-   *
-   * IceLivePage ya no crea WebSocket, Client STOMP,
-   * SockJS, watchdog ni timers de reconexión.
-   */
-  const {
-    connected: realtimeConnected,
-    status: realtimeStatus,
-  } = useRealtime();
-
-
-  /*
-   * Estado del transporte y estado de la telemetría
-   * son conceptos distintos.
-   *
-   * Que el socket esté conectado NO implica que un
-   * activo esté enviando datos recientes.
-   */
   useEffect(() => {
-
-    setConnected(
-      realtimeConnected
-    );
-
     if (
       !authorized ||
       demoMode
     ) {
-      setConnectionError(null);
       return;
     }
 
-    if (realtimeConnected) {
-      setConnectionError(null);
-      return;
-    }
+    let disposed = false;
 
-    if (
-      realtimeStatus ===
-      'connecting'
-    ) {
-      setConnectionError(
-        'Conectando con la plataforma de datos...'
-      );
-      return;
-    }
+    let currentClient: Client | null = null;
 
-    setConnectionError(
-      'Recuperando conexión de datos...'
-    );
+    let reconnectTimer: number | null = null;
+    let watchdogTimer: number | null = null;
 
-  }, [
-    authorized,
-    demoMode,
-    realtimeConnected,
-    realtimeStatus,
-  ]);
+    let generation = 0;
+
+    let attemptStartedAt = 0;
+    let connectedAt = 0;
+    let lastMessageAt = 0;
+
+    let recovering = false;
 
 
-  /*
-   * Hielo es solamente un consumidor del bus realtime.
-   *
-   * El registry del RealtimeProvider garantiza:
-   *
-   * - un único SUBSCRIBE físico por destination
-   * - resubscribe después de reconnect
-   * - cleanup al salir de la pantalla
-   */
-  useRealtimeSubscription(
-    authorized && !demoMode
-      ? '/ot/ice/live'
-      : null,
-
-    (message) => {
-
-      /*
-       * BAG es evento de negocio.
-       *
-       * Se procesa antes que la telemetría para
-       * no modificar Peso actual.
-       */
-      const bag =
-        parseBagMessage(message);
-
-      if (bag) {
-
-        if (
-          bag.assetKey !==
-          TARGET_ASSET
-        ) {
-          return;
-        }
-
-        const seen =
-          seenBagEventIdsRef.current;
-
-        if (seen.has(bag.eventId)) {
-          return;
-        }
-
-        seen.add(bag.eventId);
-
-        if (seen.size > 2048) {
-          const oldest =
-            seen.values().next().value;
-
-          if (oldest) {
-            seen.delete(oldest);
-          }
-        }
-
-        if (
-          historicalBaselineReadyRef.current &&
-          productionRef.current
-        ) {
-          const nextProduction =
-            applyBagToProduction(
-              productionRef.current,
-              bag
-            );
-
-          productionRef.current =
-            nextProduction;
-
-          setProduction(
-            nextProduction
-          );
-        } else {
-          const pending =
-            pendingLiveBagsRef.current;
-
-          pending.set(
-            bag.eventId,
-            bag
-          );
-
-          if (pending.size > 2048) {
-            const oldest =
-              pending.keys().next().value;
-
-            if (oldest) {
-              pending.delete(oldest);
-            }
-          }
-        }
-
-        setLastBag(bag);
-
-        /*
-         * Autoridad visual de fin de ciclo:
-         * event/bag productivo (V3.4).
-         */
-        setUiProcessState(
-          'BAG_CONFIRMED'
+    function clearReconnectTimer() {
+      if (reconnectTimer !== null) {
+        window.clearTimeout(
+          reconnectTimer
         );
 
-        const bagEvent: SessionEvent = {
-          id: `bag-${bag.eventId}`,
-          at: bag.receivedAt,
-          title:
-            'Saco terminado · Balanza #1',
-          detail:
-            `${bag.weightLb.toFixed(2)} lb · retiro confirmado`,
-          kind: 'success',
-        };
-
-        setSessionEvents(
-          (previous) =>
-            [
-              bagEvent,
-              ...previous,
-            ].slice(0, 6)
-        );
-
-        return;
+        reconnectTimer = null;
       }
+    }
 
-      const normalized =
-        parseMessage(message);
 
+    function scheduleReconnect(
+      delayMs = 1500
+    ) {
       if (
-        !normalized ||
-        normalized.assetKey !==
-          TARGET_ASSET
+        disposed ||
+        recovering ||
+        reconnectTimer !== null
       ) {
         return;
       }
 
+      reconnectTimer =
+        window.setTimeout(() => {
+          reconnectTimer = null;
 
-      const receivedAt =
-        Date.now();
+          if (!disposed) {
+            startClient();
+          }
+        }, delayMs);
+    }
 
 
-      setData({
-        ...normalized,
-        receivedAt,
-      });
+    async function destroyClient(
+      client: Client | null
+    ) {
+      if (!client) {
+        return;
+      }
 
+      client.reconnectDelay = 0;
+
+      try {
+        /*
+         * Destruimos el CLIENT STOMP completo.
+         *
+         * No tocamos directamente SockJS/WebSocket.
+         */
+        await Promise.race([
+          client.deactivate({
+            force: true,
+          }),
+
+          /*
+           * @stomp/stompjs puede quedar esperando
+           * el cierre de una sesión SockJS antigua.
+           *
+           * La generación anterior ya fue invalidada,
+           * por lo que después de este límite podemos
+           * continuar creando un Client completamente nuevo.
+           */
+          new Promise<void>(
+            (resolve) => {
+              window.setTimeout(
+                resolve,
+                DESTROY_CLIENT_TIMEOUT_MS
+              );
+            }
+          ),
+        ]);
+      } catch {
+        // Nunca reutilizamos este Client.
+      }
+    }
+
+
+    async function recoverClient() {
+      if (
+        disposed ||
+        recovering
+      ) {
+        return;
+      }
+
+      recovering = true;
+
+      setConnected(false);
+
+      setConnectionError(
+        'Recuperando conexión de datos...'
+      );
+
+      clearReconnectTimer();
 
       /*
-       * Historial exclusivamente de esta sesión web.
-       * Conservamos cinco minutos.
+       * Invalida inmediatamente todos los callbacks
+       * pertenecientes a la sesion anterior.
        */
-      setWeightHistory(
-        (previous) => {
+      generation += 1;
 
-          const cutoff =
-            receivedAt -
-            5 * 60 * 1000;
+      const oldClient =
+        currentClient;
 
-          const next = [
-            ...previous,
-            {
-              ts: receivedAt,
-              weightLb:
-                normalized.weightLb,
-            },
-          ].filter(
-            (point) =>
-              point.ts >= cutoff
-          );
+      currentClient = null;
+      clientRef.current = null;
 
-          return next.slice(
-            -750
+      attemptStartedAt = 0;
+      connectedAt = 0;
+      lastMessageAt = 0;
+
+      await destroyClient(
+        oldClient
+      );
+
+      if (disposed) {
+        return;
+      }
+
+      /*
+       * Dejamos que Spring/SockJS termine de limpiar
+       * la sesion anterior antes de crear otra.
+       */
+      await new Promise<void>(
+        (resolve) => {
+          window.setTimeout(
+            resolve,
+            750
           );
         }
       );
 
+      if (disposed) {
+        return;
+      }
+
+      recovering = false;
+
+      startClient();
+    }
+
+
+    function startClient() {
+      if (
+        disposed ||
+        recovering
+      ) {
+        return;
+      }
+
+      const token =
+        localStorage.getItem(
+          'cmms_access_token'
+        );
+
+      if (!token) {
+        setConnected(false);
+
+        setConnectionError(
+          'No existe una sesión válida para iniciar el monitoreo.'
+        );
+
+        return;
+      }
+
+      clearReconnectTimer();
+
+      const myGeneration =
+        ++generation;
+
+      attemptStartedAt =
+        Date.now();
+
+      connectedAt = 0;
+      lastMessageAt = 0;
+
+
+      const client =
+        new Client({
+
+          /*
+           * Cada Client crea su propia instancia SockJS.
+           */
+          webSocketFactory: () =>
+            new SockJS(
+              `${API_BASE_URL}/ws`
+            ) as WebSocket,
+
+
+          /*
+           * IMPORTANTE:
+           *
+           * deshabilitamos la reconexion automatica
+           * interna de @stomp/stompjs.
+           *
+           * Solo existe un coordinador de reconexion:
+           * este componente.
+           */
+          reconnectDelay: 0,
+
+
+          connectHeaders: {
+            token,
+          },
+
+
+          onConnect: () => {
+            if (
+              disposed ||
+              myGeneration !== generation
+            ) {
+              return;
+            }
+
+            attemptStartedAt = 0;
+            connectedAt = Date.now();
+
+            setConnected(true);
+
+            client.subscribe(
+              '/ot/ice/live',
+              (message) => {
+
+                if (
+                  disposed ||
+                  myGeneration !== generation
+                ) {
+                  return;
+                }
+
+                const normalized =
+                  parseMessage(message);
+
+                if (
+                  !normalized ||
+                  normalized.assetKey !==
+                    TARGET_ASSET
+                ) {
+                  return;
+                }
+
+                lastMessageAt =
+                  Date.now();
+
+                setData({
+                  ...normalized,
+                  receivedAt:
+                    lastMessageAt,
+                });
+
+                /*
+                 * Historial exclusivamente de esta sesión
+                 * web. Conservamos cinco minutos.
+                 */
+                setWeightHistory(
+                  (previous) => {
+                    const cutoff =
+                      lastMessageAt -
+                      5 * 60 * 1000;
+
+                    const next = [
+                      ...previous,
+                      {
+                        ts:
+                          lastMessageAt,
+                        weightLb:
+                          normalized.weightLb,
+                      },
+                    ].filter(
+                      (point) =>
+                        point.ts >=
+                        cutoff
+                    );
+
+                    return next.slice(
+                      -750
+                    );
+                  }
+                );
+
+                /*
+                 * Eventos solo cuando cambia el estado
+                 * real del detector.
+                 */
+                if (
+                  previousDetectorStateRef.current !==
+                  normalized.detectorState
+                ) {
+                  const event =
+                    buildSessionEvent(
+                      normalized,
+                      lastMessageAt
+                    );
+
+                  previousDetectorStateRef.current =
+                    normalized.detectorState;
+
+                  if (event) {
+                    setSessionEvents(
+                      (previous) =>
+                        [
+                          event,
+                          ...previous,
+                        ].slice(0, 6)
+                    );
+                  }
+                }
+
+                /*
+                 * Consideramos recuperada la conexion
+                 * solo cuando llega telemetria real.
+                 */
+                setConnectionError(null);
+              }
+            );
+          },
+
+
+          onDisconnect: () => {
+            if (
+              disposed ||
+              myGeneration !== generation
+            ) {
+              return;
+            }
+
+            setConnected(false);
+
+            scheduleReconnect();
+          },
+
+
+          onWebSocketClose: () => {
+            if (
+              disposed ||
+              myGeneration !== generation
+            ) {
+              return;
+            }
+
+            setConnected(false);
+
+            scheduleReconnect();
+          },
+
+
+          onWebSocketError: () => {
+            if (
+              disposed ||
+              myGeneration !== generation
+            ) {
+              return;
+            }
+
+            setConnected(false);
+          },
+
+
+          onStompError: (frame) => {
+            if (
+              disposed ||
+              myGeneration !== generation
+            ) {
+              return;
+            }
+
+            const stompMessage =
+              frame.headers.message ||
+              'Error STOMP';
+
+            const normalizedMessage =
+              stompMessage.toLowerCase();
+
+            /*
+             * Solo detenemos la recuperación automática
+             * ante errores reales de autenticación o permisos.
+             */
+            const authenticationError =
+              [
+                'access denied',
+                'accessdenied',
+                'unauthorized',
+                'forbidden',
+                'authentication',
+                'not authenticated',
+                'invalid token',
+                'expired token',
+                'jwt',
+              ].some(
+                (value) =>
+                  normalizedMessage.includes(
+                    value
+                  )
+              );
+
+            setConnected(false);
+
+            if (authenticationError) {
+              generation += 1;
+
+              setConnectionError(
+                stompMessage
+              );
+
+              void destroyClient(
+                client
+              );
+
+              return;
+            }
+
+            /*
+             * ERROR STOMP transitorio:
+             *
+             * utilizamos exclusivamente Watchdog V2
+             * para destruir este Client y crear uno nuevo.
+             */
+            setConnectionError(
+              'Recuperando conexión de datos...'
+            );
+
+            void recoverClient();
+          },
+        });
+
+
+      currentClient = client;
+      clientRef.current = client;
+
+      client.activate();
+    }
+
+
+    // --------------------------------------------------------
+    // PRIMER CLIENTE
+    // --------------------------------------------------------
+
+    startClient();
+
+
+    // --------------------------------------------------------
+    // WATCHDOG
+    // --------------------------------------------------------
+
+    watchdogTimer =
+      window.setInterval(() => {
+
+        if (
+          disposed ||
+          recovering ||
+          !currentClient
+        ) {
+          return;
+        }
+
+        const now =
+          Date.now();
+
 
         /*
-         * detector_state se conserva en IceLiveData
-         * únicamente como diagnóstico.
+         * CASO 1:
          *
-         * En producción NO gobierna:
-         * - twin
-         * - timeline
-         * - estado visual
+         * SockJS fue abierto pero STOMP CONNECT
+         * no termino dentro del tiempo máximo configurado.
          *
-         * El fin de ciclo viene de event/bag.
+         * No permitimos que quede una sesion
+         * esperando ~60-70 segundos en Spring.
          */
-    },
+        if (!currentClient.connected) {
 
-    authorized &&
-      !demoMode
-  );
+          if (
+            attemptStartedAt > 0 &&
+            now - attemptStartedAt >
+              STOMP_CONNECT_TIMEOUT_MS
+          ) {
+            void recoverClient();
+          }
 
+          return;
+        }
+
+
+        /*
+         * CASO 2:
+         *
+         * STOMP figura conectado pero dejo
+         * de entregar telemetria.
+         */
+        const referenceTime =
+          lastMessageAt ||
+          connectedAt;
+
+        if (
+          referenceTime > 0 &&
+          now - referenceTime >
+            TELEMETRY_RECOVERY_AFTER_MS
+        ) {
+          void recoverClient();
+        }
+
+      }, 1000);
+
+
+    // --------------------------------------------------------
+    // CLEANUP DEL COMPONENTE
+    // --------------------------------------------------------
+
+    return () => {
+
+      disposed = true;
+
+      generation += 1;
+
+      clearReconnectTimer();
+
+      if (
+        watchdogTimer !== null
+      ) {
+        window.clearInterval(
+          watchdogTimer
+        );
+      }
+
+      const oldClient =
+        currentClient;
+
+      currentClient = null;
+      clientRef.current = null;
+
+      void destroyClient(
+        oldClient
+      );
+    };
+
+  }, [
+    authorized,
+    demoMode,
+  ]);
 
   const ageMs =
     data
@@ -1356,9 +1260,7 @@ const [data, setData] =
   }, [ageMs]);
 
   const targetLb =
-    data?.targetWeightLb ??
-    production?.targetWeightLb ??
-    50;
+    data?.targetWeightLb ?? 50;
 
   const weightLb =
     data?.weightLb ?? null;
@@ -1380,30 +1282,14 @@ const [data, setData] =
     data?.detectorState ??
     'UNKNOWN';
 
-  /*
-   * DEMO conserva el FSM simulado.
-   *
-   * PRODUCCIÓN usa un estado de presentación
-   * independiente del detector V1 shadow.
-   */
-  const processState =
-    demoMode
-      ? detectorState
-      : uiProcessState;
-
   const activeScaleLabel =
-    demoMode
-      ? detectorState ===
-          'TRACKING_BAG'
-        ? 'Llenando'
-        : detectorState ===
-            'REMOVAL_CONFIRM'
-          ? 'Retiro'
-          : 'En espera'
-      : uiProcessState ===
-          'BAG_CONFIRMED'
-        ? 'Saco registrado'
-        : 'Peso en vivo';
+    detectorState ===
+      'TRACKING_BAG'
+      ? 'Llenando'
+      : detectorState ===
+          'REMOVAL_CONFIRM'
+        ? 'Retiro'
+        : 'En espera';
 
   if (!authorized) {
     return (
@@ -1553,16 +1439,6 @@ const [data, setData] =
         </Alert>
       )}
 
-      {productionError &&
-        !demoMode && (
-          <Alert
-            severity="warning"
-            sx={{ mb: 2 }}
-          >
-            {productionError}
-          </Alert>
-        )}
-
       {stale &&
         !connectionError && (
           <Alert
@@ -1595,7 +1471,7 @@ const [data, setData] =
           weightLb={weightLb}
           targetLb={targetLb}
           detectorState={
-            processState
+            detectorState
           }
           online={online}
           progress={progress}
@@ -1624,20 +1500,12 @@ const [data, setData] =
             value={
               demoMode
                 ? '18'
-                : production
-                  ? String(production.bagsToday)
-                  : '—'
+                : '—'
             }
             caption={
               demoMode
                 ? 'DEMO · datos simulados'
-                : productionError
-                  ? 'Histórico no disponible'
-                  : lastBag
-                    ? `Último saco en vivo · ${lastBag.weightLb.toFixed(2)} lb`
-                    : production
-                      ? 'Histórico del día · realtime activo'
-                      : 'Cargando histórico...'
+                : 'Pendiente bag_events'
             }
           />
 
@@ -1649,19 +1517,13 @@ const [data, setData] =
             value={
               demoMode
                 ? '50.02'
-                : production?.averageWeightLb != null
-                  ? production.averageWeightLb.toFixed(2)
-                  : '—'
+                : '—'
             }
             unit="lb"
             caption={
               demoMode
                 ? 'DEMO · últimos 18 sacos'
-                : production
-                  ? 'Promedio de sacos de hoy'
-                  : productionError
-                    ? 'Histórico no disponible'
-                    : 'Cargando histórico...'
+                : 'Pendiente bag_events'
             }
           />
 
@@ -1673,19 +1535,13 @@ const [data, setData] =
             value={
               demoMode
                 ? '900.4'
-                : production
-                  ? production.totalWeightLb.toFixed(1)
-                  : '—'
+                : '—'
             }
             unit="lb"
             caption={
               demoMode
                 ? 'DEMO · peso total'
-                : production
-                  ? 'Producción acumulada de hoy'
-                  : productionError
-                    ? 'Histórico no disponible'
-                    : 'Cargando histórico...'
+                : 'Pendiente bag_events'
             }
           />
 
@@ -2093,15 +1949,11 @@ const [data, setData] =
             : '—'}
           {' · '}
           Estado:{' '}
-            {data
-              ? demoMode
-                ? detectorLabel(
-                    data.detectorState
-                  )
-                : processStateLabel(
-                    uiProcessState
-                  )
-              : 'Esperando datos'}
+          {data
+            ? detectorLabel(
+                data.detectorState
+              )
+            : 'Esperando datos'}
         </Typography>
       </Stack>
     </Box>

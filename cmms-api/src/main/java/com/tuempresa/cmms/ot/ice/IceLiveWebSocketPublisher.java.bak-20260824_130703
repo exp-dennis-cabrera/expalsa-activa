@@ -68,50 +68,11 @@ public class IceLiveWebSocketPublisher {
     }
 
 
-    public void publishBag(
-        IceBagEventMessage message
-    ) {
-
-        if (
-            message == null
-            || message.assetKey() == null
-            || message.assetKey().isBlank()
-            || message.eventId() == null
-            || message.eventId().isBlank()
-            || message.removedAt() == null
-            || message.removedAt().isBlank()
-        ) {
-            return;
-        }
-
-        Double weightLb =
-            message.weightLb();
-
-        if (weightLb == null) {
-            return;
-        }
-
-        IceBagPayload payload =
-            new IceBagPayload(
-                "bag",
-                message.assetKey(),
-                message.eventId(),
-                message.removedAt(),
-                message.eventWeightKg(),
-                weightLb,
-                message.targetWeightLb(),
-                message.qualityCode()
-            );
-
-        messagingTemplate.convertAndSend(
-            DESTINATION,
-            payload
-        );
-    }
-
-
     /*
-     * Contrato de telemetria para React.
+     * Contrato pensado para React.
+     *
+     * No exponemos MQTT, credenciales, PLC,
+     * sample internals ni detalles de infraestructura.
      */
     public record IceLivePayload(
         String type,
@@ -124,25 +85,6 @@ public class IceLiveWebSocketPublisher {
         String detectorState,
         int qualityCode,
         long collectionDurationMs
-    ) {
-    }
-
-
-    /*
-     * Contrato reducido del saco terminado.
-     *
-     * No exponemos MQTT, PLC, message_id,
-     * detector internals ni infraestructura.
-     */
-    public record IceBagPayload(
-        String type,
-        String assetKey,
-        String eventId,
-        String removedAt,
-        double weightKg,
-        double weightLb,
-        Double targetLb,
-        int qualityCode
     ) {
     }
 }

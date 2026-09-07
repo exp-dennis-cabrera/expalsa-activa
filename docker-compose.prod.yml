@@ -1,0 +1,92 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-cmms}
+      POSTGRES_USER: ${DB_USER:-cmms_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Expuesto SOLO por la IP de Tailscale, para que Superset (que corre
+    # en la LAN de planta) pueda consultar. La IP delante del puerto es
+    # lo que impide que quede abierto a internet: sin ella, Docker
+    # escucharia en todas las interfaces.
+    ports:
+      - "100.100.206.54:5432:5432"
+  minio:
+    image: minio/minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    # Idem: sin exponer puertos al publico. Se llega a MinIO solo a traves
+    # de Caddy, en la ruta /storage/*.
+  backend:
+    build:
+      context: ./cmms-api
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      OT_MQTT_ENABLED: "true"
+      OT_MQTT_BROKER: "tcp://100.102.218.59:1883"
+      OT_MQTT_USERNAME: "cmms_ot_live"
+      OT_MQTT_PASSWORD_FILE: "/run/secrets/cmms_ot_live_mqtt_password"
+      OT_MQTT_CLIENT_ID: "expalsa-activa-ice-live-01"
+      OT_MQTT_TOPIC: "expalsa/ot/pesaje/hielo/+/telemetry/weight"
+      DATABASE_URL: jdbc:postgresql://postgres:5432/${DB_NAME:-cmms}
+      DATABASE_USERNAME: ${DB_USER:-cmms_user}
+      DATABASE_PASSWORD: ${DB_PASSWORD}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      PUBLIC_FRONT_URL: https://${PUBLIC_HOSTNAME}
+      STORAGE_TYPE: minio
+      # Direccion INTERNA: por aca el backend habla con MinIO dentro de Docker.
+      STORAGE_ENDPOINT: http://minio:9000
+      # Direccion PUBLICA: la que el backend escribe en los enlaces que
+      # recibe el navegador. Sin esto, las imagenes salian apuntando a
+      # "http://minio:9000" y el navegador no podia resolverlas.
+      PUBLIC_MINIO_ENDPOINT: https://${PUBLIC_HOSTNAME}/storage
+      STORAGE_BUCKET: ${MINIO_BUCKET:-cmms-files}
+      STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER}
+      STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MAIL_ENABLED: ${MAIL_ENABLED:-false}
+      MAIL_TYPE: ${MAIL_TYPE:-SENDGRID}
+      MAIL_FROM: ${MAIL_FROM:-}
+      MAIL_FROM_NAME: ${MAIL_FROM_NAME:-Expalsa Activa}
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
+      AI_ENABLED: ${AI_ENABLED:-false}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
+    depends_on:
+      - postgres
+      - minio
+    volumes:
+      - /opt/expalsa-activa/secrets/cmms-ot-live-mqtt.password:/run/secrets/cmms_ot_live_mqtt_password:ro
+    # Tampoco expuesto directo -- Caddy (dentro del contenedor "frontend")
+    # es el unico que le habla, via la red interna de Docker.
+  frontend:
+    build:
+      context: ./cmms-frontend
+      args:
+        VITE_API_URL: https://${PUBLIC_HOSTNAME}/api
+    restart: unless-stopped
+    environment:
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME}
+    depends_on:
+      - backend
+      # Caddy ahora tambien enruta hacia MinIO (/storage/*).
+      - minio
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+volumes:
+  postgres_data:
+  minio_data:
+  caddy_data:
+  caddy_config:

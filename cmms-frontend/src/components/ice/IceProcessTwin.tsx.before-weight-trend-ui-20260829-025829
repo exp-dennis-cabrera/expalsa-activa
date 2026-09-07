@@ -1,10 +1,4 @@
 import {
-  useEffect,
-  useRef,
-  useState,
-} from 'react';
-
-import {
   Box,
   Chip,
   LinearProgress,
@@ -23,27 +17,6 @@ type Props = {
 
 const IMAGE_SRC =
   '/ice/latamfoods-silo-base.png';
-
-/*
- * Histeresis exclusivamente visual.
- *
- * Sirve para que las partículas representen
- * movimiento ascendente real del peso, en vez
- * de simplemente "existe peso sobre la balanza".
- *
- * No interviene en detección V3.4 ni KPIs.
- */
-const VISUAL_RISE_EPS_LB = 0.15;
-const VISUAL_FLOW_HOLD_MS = 650;
-
-/*
- * BAG_CONFIRMED dura 1500 ms en la página.
- *
- * Este settle total de 2200 ms deja ~700 ms
- * adicionales para absorber rebote visual
- * después de salir de BAG_CONFIRMED.
- */
-const POST_BAG_VISUAL_SETTLE_MS = 2200;
 
 function stateLabel(
   state: string
@@ -84,199 +57,19 @@ export default function IceProcessTwin({
   progress,
 }: Props) {
   /*
-   * El nivel azul y las partículas tienen
-   * semánticas distintas:
+   * Animación exclusivamente visual.
    *
-   * - progress controla cantidad/nivel.
-   * - visualFilling representa movimiento
-   *   ascendente del peso.
+   * DEMO:
+   *   TRACKING_BAG conserva el comportamiento histórico.
    *
-   * Esto evita mostrar "llenado" simplemente
-   * porque quedó peso residual sobre la balanza.
+   * PRODUCTIVO:
+   *   MONITORING_WEIGHT no es un detector de ciclos.
+   *   Solamente permite visualizar el flujo mientras
+   *   existe progreso de peso.
+   *
+   * La detección real de saco continúa siendo V3.4
+   * mediante event/bag.
    */
-  const [
-    visualFilling,
-    setVisualFilling,
-  ] = useState(false);
-
-  const previousWeightRef =
-    useRef<number | null>(null);
-
-  const lastRiseAtRef =
-    useRef(0);
-
-  const suppressUntilRef =
-    useRef(0);
-
-  const previousVisualStateRef =
-    useRef<string | null>(null);
-
-  useEffect(() => {
-    const now = Date.now();
-
-    const enteringBagConfirmed =
-      detectorState ===
-        'BAG_CONFIRMED' &&
-      previousVisualStateRef.current !==
-        'BAG_CONFIRMED';
-
-    previousVisualStateRef.current =
-      detectorState;
-
-    /*
-     * Al entrar a BAG_CONFIRMED:
-     * - apagar flujo inmediatamente;
-     * - guardar peso actual como nueva referencia;
-     * - bloquear brevemente el rebote posterior.
-     */
-    if (enteringBagConfirmed) {
-      suppressUntilRef.current =
-        now +
-        POST_BAG_VISUAL_SETTLE_MS;
-
-      lastRiseAtRef.current = 0;
-      previousWeightRef.current =
-        weightLb;
-
-      setVisualFilling(false);
-
-      return;
-    }
-
-    /*
-     * Mientras BAG_CONFIRMED siga activo,
-     * el nivel puede seguir mostrando peso,
-     * pero nunca mostramos entrada de producto.
-     */
-    if (
-      detectorState ===
-        'BAG_CONFIRMED'
-    ) {
-      previousWeightRef.current =
-        weightLb;
-
-      lastRiseAtRef.current = 0;
-
-      setVisualFilling(false);
-
-      return;
-    }
-
-    /*
-     * DEMO conserva su FSM histórico.
-     * Esta lógica solamente gobierna
-     * MONITORING_WEIGHT productivo.
-     */
-    if (
-      detectorState !==
-        'MONITORING_WEIGHT'
-    ) {
-      previousWeightRef.current =
-        weightLb;
-
-      lastRiseAtRef.current = 0;
-      setVisualFilling(false);
-
-      return;
-    }
-
-    if (
-      !online ||
-      weightLb == null ||
-      !Number.isFinite(weightLb)
-    ) {
-      previousWeightRef.current =
-        null;
-
-      lastRiseAtRef.current = 0;
-      setVisualFilling(false);
-
-      return;
-    }
-
-    const previous =
-      previousWeightRef.current;
-
-    previousWeightRef.current =
-      weightLb;
-
-    /*
-     * Primera muestra:
-     * únicamente establece referencia.
-     */
-    if (previous == null) {
-      setVisualFilling(false);
-      return;
-    }
-
-    /*
-     * Ventana post-saco:
-     * el peso continúa siendo real y visible,
-     * pero el rebote no vuelve a encender
-     * las partículas.
-     */
-    if (
-      now <
-      suppressUntilRef.current
-    ) {
-      lastRiseAtRef.current = 0;
-      setVisualFilling(false);
-      return;
-    }
-
-    const delta =
-      weightLb - previous;
-
-    /*
-     * Tendencia ascendente:
-     * flujo visual ON.
-     */
-    if (
-      delta >
-      VISUAL_RISE_EPS_LB
-    ) {
-      lastRiseAtRef.current =
-        now;
-
-      setVisualFilling(true);
-
-      return;
-    }
-
-    /*
-     * Tendencia descendente:
-     * flujo OFF inmediatamente.
-     */
-    if (
-      delta <
-      -VISUAL_RISE_EPS_LB
-    ) {
-      lastRiseAtRef.current = 0;
-
-      setVisualFilling(false);
-
-      return;
-    }
-
-    /*
-     * Peso prácticamente estable:
-     * una pequeña persistencia evita
-     * parpadeo visual entre muestras.
-     */
-    setVisualFilling(
-      lastRiseAtRef.current > 0 &&
-      (
-        now -
-        lastRiseAtRef.current
-      ) <=
-        VISUAL_FLOW_HOLD_MS
-    );
-  }, [
-    detectorState,
-    online,
-    weightLb,
-  ]);
-
   const filling =
     online &&
     (
@@ -285,7 +78,7 @@ export default function IceProcessTwin({
       (
         detectorState ===
           'MONITORING_WEIGHT' &&
-        visualFilling
+        progress > 0
       )
     );
 

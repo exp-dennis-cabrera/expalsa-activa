@@ -20,10 +20,6 @@ import org.springframework.stereotype.Component;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 
 @Component
@@ -57,33 +53,7 @@ public class IceMqttSubscriber
     @Value("${OT_MQTT_TOPIC:expalsa/ot/pesaje/hielo/+/telemetry/weight}")
     private String topic;
 
-    @Value("${OT_MQTT_BAG_TOPIC:expalsa/ot/pesaje/hielo/+/event/bag}")
-    private String bagTopic;
-
     private MqttAsyncClient client;
-
-    /*
-     * QoS 1 puede volver a entregar un mensaje.
-     *
-     * Conservamos una ventana acotada de event_id
-     * para no generar dos eventos STOMP para
-     * el mismo saco dentro de este proceso.
-     */
-    private final Map<String, Boolean> recentBagEvents =
-        Collections.synchronizedMap(
-            new LinkedHashMap<String, Boolean>(
-                256,
-                0.75f,
-                true
-            ) {
-                @Override
-                protected boolean removeEldestEntry(
-                    Map.Entry<String, Boolean> eldest
-                ) {
-                    return size() > 2048;
-                }
-            }
-        );
 
     private final AtomicLong lastLiveLogMs =
         new AtomicLong(0L);
@@ -203,20 +173,13 @@ public class IceMqttSubscriber
         try {
 
             client.subscribe(
-                new String[] {
-                    topic,
-                    bagTopic
-                },
-                new int[] {
-                    1,
-                    1
-                }
+                topic,
+                1
             );
 
             log.info(
-                "OT MQTT connected and subscribed weightTopic={} bagTopic={} qos=1",
-                topic,
-                bagTopic
+                "OT MQTT connected and subscribed topic={} qos=1",
+                topic
             );
 
         } catch (Exception ex) {
@@ -247,36 +210,57 @@ public class IceMqttSubscriber
         MqttMessage mqttMessage
     ) {
 
-        if (topic == null || mqttMessage == null) {
-            return;
-        }
-
         try {
 
-            if (topic.endsWith("/event/bag")) {
-
-                handleBagMessage(
-                    topic,
-                    mqttMessage
+            IceLiveMessage message =
+                objectMapper.readValue(
+                    mqttMessage.getPayload(),
+                    IceLiveMessage.class
                 );
 
-                return;
-            }
+            stateService.update(message);
 
-            if (topic.endsWith("/telemetry/weight")) {
+            /*
+             * Fan-out realtime.
+             *
+             * No consulta PostgreSQL y no escribe nada.
+             */
+            webSocketPublisher.publish(message);
 
-                handleWeightMessage(
-                    topic,
-                    mqttMessage
+            long nowMs =
+                System.currentTimeMillis();
+
+            long previous =
+                lastLiveLogMs.get();
+
+            if (
+                nowMs - previous >= 5000L
+                && lastLiveLogMs.compareAndSet(
+                    previous,
+                    nowMs
+                )
+            ) {
+
+                log.info(
+                    "ICE LIVE asset={} weight_kg={} weight_lb={} target_lb={} state={} quality={} read_ms={}",
+                    message.getAssetKey(),
+                    String.format(
+                        "%.3f",
+                        message.getWeightKg()
+                    ),
+                    String.format(
+                        "%.3f",
+                        message.getWeightLb()
+                    ),
+                    String.format(
+                        "%.3f",
+                        message.getTargetWeightLb()
+                    ),
+                    message.getDetectorState(),
+                    message.getQualityCode(),
+                    message.getCollectionDurationMs()
                 );
-
-                return;
             }
-
-            log.warn(
-                "OT MQTT ignored unexpected topic={}",
-                topic
-            );
 
         } catch (Exception ex) {
 
@@ -287,169 +271,6 @@ public class IceMqttSubscriber
             );
         }
     }
-
-
-    private void handleWeightMessage(
-        String topic,
-        MqttMessage mqttMessage
-    ) throws Exception {
-
-        IceLiveMessage message =
-            objectMapper.readValue(
-                mqttMessage.getPayload(),
-                IceLiveMessage.class
-            );
-
-        stateService.update(message);
-
-        /*
-         * Fan-out realtime.
-         *
-         * No consulta PostgreSQL y no escribe nada.
-         */
-        webSocketPublisher.publish(message);
-
-        long nowMs =
-            System.currentTimeMillis();
-
-        long previous =
-            lastLiveLogMs.get();
-
-        if (
-            nowMs - previous >= 5000L
-            && lastLiveLogMs.compareAndSet(
-                previous,
-                nowMs
-            )
-        ) {
-
-            log.info(
-                "ICE LIVE asset={} weight_kg={} weight_lb={} target_lb={} state={} quality={} read_ms={}",
-                message.getAssetKey(),
-                String.format(
-                    "%.3f",
-                    message.getWeightKg()
-                ),
-                String.format(
-                    "%.3f",
-                    message.getWeightLb()
-                ),
-                String.format(
-                    "%.3f",
-                    message.getTargetWeightLb()
-                ),
-                message.getDetectorState(),
-                message.getQualityCode(),
-                message.getCollectionDurationMs()
-            );
-        }
-    }
-
-
-    private void handleBagMessage(
-        String topic,
-        MqttMessage mqttMessage
-    ) throws Exception {
-
-        IceBagEventMessage message =
-            objectMapper.readValue(
-                mqttMessage.getPayload(),
-                IceBagEventMessage.class
-            );
-
-        if (
-            message.assetKey() == null
-            || message.assetKey().isBlank()
-            || message.eventId() == null
-            || message.eventId().isBlank()
-            || message.removedAt() == null
-            || message.removedAt().isBlank()
-        ) {
-            throw new IllegalArgumentException(
-                "bag event required fields missing"
-            );
-        }
-
-        /*
-         * El event_id contractual es UUID.
-         */
-        UUID.fromString(
-            message.eventId()
-        );
-
-        /*
-         * Defensa adicional:
-         * asset_key del payload debe coincidir
-         * con el asset presente en el topic MQTT.
-         */
-        String expectedSuffix =
-            "/"
-            + message.assetKey()
-            + "/event/bag";
-
-        if (!topic.endsWith(expectedSuffix)) {
-            throw new IllegalArgumentException(
-                "bag asset/topic mismatch"
-            );
-        }
-
-        Double weightLb =
-            message.weightLb();
-
-        if (
-            weightLb == null
-            || !Double.isFinite(weightLb)
-            || weightLb < 0.0d
-        ) {
-            throw new IllegalArgumentException(
-                "bag weight invalid"
-            );
-        }
-
-        if (!rememberBagEvent(message.eventId())) {
-
-            log.info(
-                "ICE BAG duplicate ignored asset={} event_id={}",
-                message.assetKey(),
-                message.eventId()
-            );
-
-            return;
-        }
-
-        webSocketPublisher.publishBag(
-            message
-        );
-
-        log.info(
-            "ICE BAG LIVE asset={} event_id={} weight_lb={} removed_at={}",
-            message.assetKey(),
-            message.eventId(),
-            String.format("%.3f", weightLb),
-            message.removedAt()
-        );
-    }
-
-
-    private boolean rememberBagEvent(
-        String eventId
-    ) {
-
-        synchronized (recentBagEvents) {
-
-            if (recentBagEvents.containsKey(eventId)) {
-                return false;
-            }
-
-            recentBagEvents.put(
-                eventId,
-                Boolean.TRUE
-            );
-
-            return true;
-        }
-    }
-
 
     @Override
     public void deliveryComplete(

@@ -1,9 +1,4 @@
-{
-        default_sni {$PUBLIC_HOSTNAME}
-}
-
 {$PUBLIC_HOSTNAME} {
-	tls internal
 	# Cabeceras de seguridad (control ISO 27001).
 	header {
 		X-Content-Type-Options nosniff

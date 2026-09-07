@@ -1,5 +1,4 @@
 # syntax=docker/dockerfile:1
-
 FROM node:20-alpine AS build
 WORKDIR /app
 COPY package*.json ./
@@ -17,11 +16,11 @@ COPY package*.json ./
 # react-beautiful-dnd 13.1.0 declara soportar solo hasta React 17, y aca
 # corre React 18. La libreria funciona igual (Atlas la usa en produccion),
 # pero sin esta bandera npm se niega a instalarla.
-RUN --mount=type=cache,id=cmms-frontend-npm,target=/root/.npm,sharing=locked \
+RUN --mount=type=cache,id=cmms-npm,target=/root/.npm,sharing=locked \
     npm config set fetch-retries 5 \
-    && npm config set fetch-retry-mintimeout 10000 \
-    && npm config set fetch-retry-maxtimeout 60000 \
-    && npm ci --legacy-peer-deps --no-audit --no-fund --loglevel=verbose
+    && npm config set fetch-retry-mintimeout 20000 \
+    && npm config set fetch-retry-maxtimeout 120000 \
+    && npm ci --legacy-peer-deps --prefer-offline --no-audit
 COPY . .
 # Vite incrusta las variables de entorno en el momento de compilar, no en
 # tiempo de ejecucion -- por eso va como build-arg, no como env normal.

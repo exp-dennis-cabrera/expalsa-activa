@@ -1,0 +1,142 @@
+name: expalsa-activa-preprod
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: ${DB_NAME:-cmms_preprod}
+      POSTGRES_USER: ${DB_USER:-cmms_preprod}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${DB_USER:-cmms_preprod} -d ${DB_NAME:-cmms_preprod}"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+
+  minio:
+    image: minio/minio
+    restart: unless-stopped
+
+    command: server /data --console-address ":9001"
+
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+
+    volumes:
+      - minio_data:/data
+
+
+  backend:
+    image: expalsa-activa-backend:ot-dashboard-preprod-20260824-01
+    restart: unless-stopped
+
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+
+      DATABASE_URL: jdbc:postgresql://postgres:5432/${DB_NAME:-cmms_preprod}
+      DATABASE_USERNAME: ${DB_USER:-cmms_preprod}
+      DATABASE_PASSWORD: ${DB_PASSWORD}
+
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+
+      PUBLIC_FRONT_URL: https://${PUBLIC_HOSTNAME}
+
+      STORAGE_TYPE: minio
+      STORAGE_ENDPOINT: http://minio:9000
+      PUBLIC_MINIO_ENDPOINT: https://${PUBLIC_HOSTNAME}/storage
+      STORAGE_BUCKET: ${MINIO_BUCKET:-cmms-preprod-files}
+      STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER}
+      STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+
+      MAIL_ENABLED: "false"
+      MAIL_TYPE: ${MAIL_TYPE:-SENDGRID}
+      MAIL_FROM: ""
+      MAIL_FROM_NAME: "Expalsa Activa PREPROD"
+      SENDGRID_API_KEY: ""
+
+      AI_ENABLED: "false"
+      OLLAMA_BASE_URL: ""
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
+
+      # PREPROD:
+      # MQTT queda deliberadamente desconectado inicialmente.
+      OT_MQTT_ENABLED: "true"
+      OT_MQTT_BROKER: "tcp://192.168.0.218:1883"
+      OT_MQTT_USERNAME: "cmms_ot_preprod"
+      OT_MQTT_PASSWORD_FILE: /run/secrets/cmms_ot_preprod_mqtt_password
+      OT_MQTT_CLIENT_ID: "expalsa-activa-preprod-ice-live-01"
+      OT_MQTT_TOPIC: "expalsa/ot/pesaje/hielo/+/telemetry/weight"
+      OT_MQTT_BAG_TOPIC: "expalsa/ot/pesaje/hielo/+/event/bag"
+
+      # OT Data Service - PREPROD
+      OT_DATA_SERVICE_ENABLED: "true"
+      OT_DATA_SERVICE_BASE_URL: "https://ot-api.expalsa.com"
+      OT_AUTH_TOKEN_URL: "https://auth.expalsa.com/realms/expalsa-ot/protocol/openid-connect/token"
+      OT_M2M_CLIENT_ID: "expalsa-activa-preprod"
+      OT_M2M_CLIENT_SECRET_FILE: "/run/secrets/expalsa-ot-client-secret"
+      OT_M2M_SCOPE: "ot.ice.read"
+      OT_CA_FILE: "/run/secrets/expalsa-ot-root-ca.crt"
+
+    extra_hosts:
+      - "auth.expalsa.com:192.168.0.218"
+      - "ot-api.expalsa.com:192.168.0.218"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+      minio:
+        condition: service_started
+
+    volumes:
+      - /opt/expalsa-activa/secrets/cmms-ot-preprod-mqtt.password:/run/secrets/cmms_ot_preprod_mqtt_password:ro
+      - /opt/expalsa-activa/secrets/ot-pki/root.crt:/run/secrets/expalsa-ot-root-ca.crt:ro
+      - /opt/expalsa-activa/secrets/ot-m2m/client-secret:/run/secrets/expalsa-ot-client-secret:ro
+
+
+  frontend:
+    build:
+      context: ./cmms-frontend
+
+      args:
+        VITE_API_URL: /api
+
+    image: expalsa-activa-frontend:ice-v34-ui-state-preprod-20260828-04
+
+    restart: unless-stopped
+
+    environment:
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME}
+
+    depends_on:
+      - backend
+      - minio
+
+    ports:
+      - "80:80"
+      - "443:443"
+
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./cmms-frontend/Caddyfile:/etc/caddy/Caddyfile:ro
+
+
+volumes:
+  postgres_data:
+  minio_data:
+  caddy_data:
+  caddy_config:

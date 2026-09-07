@@ -28,7 +28,6 @@ import {
 } from 'recharts';
 
 import { useAuth } from '../context/AuthContext';
-import { api, getErrorMessage } from '../api/client';
 import { useRealtime, useRealtimeSubscription } from '../realtime/RealtimeContext';
 import IceProcessTwin from '../components/ice/IceProcessTwin';
 
@@ -36,36 +35,6 @@ const TARGET_ASSET =
   'lat-silo-hielo-01-scale-01';
 
 const STALE_AFTER_MS = 12000;
-
-/*
- * Estado exclusivamente visual.
- *
- * No detecta ciclos.
- * No modifica MQTT.
- * No modifica KPIs.
- * No sustituye V3.4.
- *
- * BAG_CONFIRMED solamente puede originarse
- * desde un event/bag productivo.
- */
-const BAG_CONFIRMED_UI_MS = 1500;
-
-type UiProcessState =
-  | 'MONITORING_WEIGHT'
-  | 'BAG_CONFIRMED';
-
-function processStateLabel(
-  state: UiProcessState
-): string {
-  switch (state) {
-    case 'BAG_CONFIRMED':
-      return 'Saco registrado';
-
-    case 'MONITORING_WEIGHT':
-    default:
-      return 'Peso en vivo';
-  }
-}
 
 /*
  * DEMO únicamente de frontend.
@@ -138,47 +107,6 @@ type IceBagData = {
   qualityCode: number | null;
   receivedAt: number;
 };
-
-type IceDashboardResponse = {
-  asOf: string;
-  assetKey: string;
-  production: {
-    bagsToday: number;
-    averageWeightLb: number | null;
-    totalWeightLb: number;
-    targetWeightLb: number | null;
-  };
-  recentBags: Array<{
-    eventId: string;
-  }>;
-};
-
-type IceProductionState =
-  IceDashboardResponse['production'];
-
-function applyBagToProduction(
-  current: IceProductionState,
-  bag: IceBagData
-): IceProductionState {
-  const bagsToday =
-    current.bagsToday + 1;
-
-  const totalWeightLb =
-    current.totalWeightLb +
-    bag.weightLb;
-
-  return {
-    bagsToday,
-    totalWeightLb,
-    averageWeightLb:
-      bagsToday > 0
-        ? totalWeightLb / bagsToday
-        : null,
-    targetWeightLb:
-      current.targetWeightLb ??
-      bag.targetWeightLb,
-  };
-}
 
 type WeightPoint = {
   ts: number;
@@ -674,30 +602,6 @@ const [data, setData] =
   const [lastBag, setLastBag] =
     useState<IceBagData | null>(null);
 
-  /*
-   * Estado visual productivo.
-   *
-   * NO se alimenta de telemetry.detector_state:
-   * ese campo permanece como diagnóstico V1.
-   */
-  const [uiProcessState, setUiProcessState] =
-    useState<UiProcessState>(
-      'MONITORING_WEIGHT'
-    );
-
-  const [production, setProduction] =
-    useState<IceProductionState | null>(null);
-
-  const [productionError, setProductionError] =
-    useState<string | null>(null);
-
-  /*
-   * Estado síncrono para evitar una carrera entre
-   * commit de React y llegada de un event/bag STOMP.
-   */
-  const productionRef =
-    useRef<IceProductionState | null>(null);
-
   const [connected, setConnected] =
     useState(false);
 
@@ -723,183 +627,9 @@ const [data, setData] =
   const seenBagEventIdsRef =
     useRef<Set<string>>(new Set());
 
-  const historicalBaselineReadyRef =
-    useRef(false);
-
-  const pendingLiveBagsRef =
-    useRef<Map<string, IceBagData>>(
-      new Map()
-    );
-
   const authorized =
     role === 'ADMIN' ||
     role === 'LIMITED_ADMIN';
-
-
-  /*
-   * Snapshot canónico al entrar.
-   * No polling.
-   */
-  useEffect(() => {
-    if (!authorized || demoMode) {
-      historicalBaselineReadyRef.current =
-        false;
-
-      productionRef.current =
-        null;
-
-      pendingLiveBagsRef.current.clear();
-
-      setProduction(null);
-      setProductionError(null);
-
-      return;
-    }
-
-    const controller =
-      new AbortController();
-
-    historicalBaselineReadyRef.current =
-      false;
-
-    productionRef.current =
-      null;
-
-    pendingLiveBagsRef.current.clear();
-    seenBagEventIdsRef.current.clear();
-
-    setProduction(null);
-    setProductionError(null);
-
-    void api
-      .get<IceDashboardResponse>(
-        `/ot/ice/assets/${TARGET_ASSET}/dashboard`,
-        controller.signal
-      )
-      .then((dashboard) => {
-        if (controller.signal.aborted) {
-          return;
-        }
-
-        if (
-          dashboard.assetKey !==
-          TARGET_ASSET
-        ) {
-          throw new Error(
-            'El histórico OT respondió para otro activo.'
-          );
-        }
-
-        const source =
-          dashboard.production;
-
-        if (
-          !source ||
-          !Number.isFinite(source.bagsToday) ||
-          !Number.isFinite(source.totalWeightLb)
-        ) {
-          throw new Error(
-            'El histórico OT devolvió KPIs inválidos.'
-          );
-        }
-
-        const historicalIds =
-          new Set(
-            (dashboard.recentBags ?? [])
-              .map((bag) => bag.eventId)
-              .filter(Boolean)
-          );
-
-        const seen =
-          seenBagEventIdsRef.current;
-
-        for (const eventId of historicalIds) {
-          seen.add(eventId);
-        }
-
-        let nextProduction:
-          IceProductionState = {
-            bagsToday:
-              source.bagsToday,
-            averageWeightLb:
-              source.averageWeightLb,
-            totalWeightLb:
-              source.totalWeightLb,
-            targetWeightLb:
-              source.targetWeightLb,
-          };
-
-        /*
-         * Incorporar eventos STOMP recibidos mientras
-         * el GET estaba en vuelo únicamente si el
-         * snapshot no los contenía.
-         */
-        for (
-          const [eventId, bag]
-          of pendingLiveBagsRef.current
-        ) {
-          if (historicalIds.has(eventId)) {
-            continue;
-          }
-
-          nextProduction =
-            applyBagToProduction(
-              nextProduction,
-              bag
-            );
-        }
-
-        pendingLiveBagsRef.current.clear();
-
-        /*
-         * Primero actualizamos el ref síncrono.
-         * Después React.
-         * Solo finalmente habilitamos incrementos live.
-         */
-        productionRef.current =
-          nextProduction;
-
-        setProduction(
-          nextProduction
-        );
-
-        historicalBaselineReadyRef.current =
-          true;
-      })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted) {
-          return;
-        }
-
-        historicalBaselineReadyRef.current =
-          false;
-
-        productionRef.current =
-          null;
-
-        setProductionError(
-          getErrorMessage(
-            error,
-            'No se pudo cargar la producción histórica.'
-          )
-        );
-      });
-
-    return () => {
-      controller.abort();
-
-      historicalBaselineReadyRef.current =
-        false;
-
-      productionRef.current =
-        null;
-
-      pendingLiveBagsRef.current.clear();
-    };
-  }, [
-    authorized,
-    demoMode,
-  ]);
 
   useEffect(() => {
     const timer =
@@ -911,42 +641,6 @@ const [data, setData] =
     return () =>
       window.clearInterval(timer);
   }, []);
-
-  /*
-   * Después de un event/bag mostramos
-   * "Saco registrado" durante 1.5 s.
-   *
-   * Es únicamente presentación.
-   */
-  useEffect(() => {
-    if (
-      demoMode ||
-      uiProcessState !==
-        'BAG_CONFIRMED'
-    ) {
-      return;
-    }
-
-    const timer =
-      window.setTimeout(
-        () => {
-          setUiProcessState(
-            (current) =>
-              current ===
-              'BAG_CONFIRMED'
-                ? 'MONITORING_WEIGHT'
-                : current
-          );
-        },
-        BAG_CONFIRMED_UI_MS
-      );
-
-    return () =>
-      window.clearTimeout(timer);
-  }, [
-    demoMode,
-    uiProcessState,
-  ]);
 
   useEffect(() => {
     if (
@@ -1188,50 +882,7 @@ const [data, setData] =
           }
         }
 
-        if (
-          historicalBaselineReadyRef.current &&
-          productionRef.current
-        ) {
-          const nextProduction =
-            applyBagToProduction(
-              productionRef.current,
-              bag
-            );
-
-          productionRef.current =
-            nextProduction;
-
-          setProduction(
-            nextProduction
-          );
-        } else {
-          const pending =
-            pendingLiveBagsRef.current;
-
-          pending.set(
-            bag.eventId,
-            bag
-          );
-
-          if (pending.size > 2048) {
-            const oldest =
-              pending.keys().next().value;
-
-            if (oldest) {
-              pending.delete(oldest);
-            }
-          }
-        }
-
         setLastBag(bag);
-
-        /*
-         * Autoridad visual de fin de ciclo:
-         * event/bag productivo (V3.4).
-         */
-        setUiProcessState(
-          'BAG_CONFIRMED'
-        );
 
         const bagEvent: SessionEvent = {
           id: `bag-${bag.eventId}`,
@@ -1306,17 +957,34 @@ const [data, setData] =
       );
 
 
-        /*
-         * detector_state se conserva en IceLiveData
-         * únicamente como diagnóstico.
-         *
-         * En producción NO gobierna:
-         * - twin
-         * - timeline
-         * - estado visual
-         *
-         * El fin de ciclo viene de event/bag.
-         */
+      /*
+       * Eventos solo cuando cambia el estado
+       * real del detector.
+       */
+      if (
+        previousDetectorStateRef.current !==
+        normalized.detectorState
+      ) {
+
+        const event =
+          buildSessionEvent(
+            normalized,
+            receivedAt
+          );
+
+        previousDetectorStateRef.current =
+          normalized.detectorState;
+
+        if (event) {
+          setSessionEvents(
+            (previous) =>
+              [
+                event,
+                ...previous,
+              ].slice(0, 6)
+          );
+        }
+      }
     },
 
     authorized &&
@@ -1356,9 +1024,7 @@ const [data, setData] =
   }, [ageMs]);
 
   const targetLb =
-    data?.targetWeightLb ??
-    production?.targetWeightLb ??
-    50;
+    data?.targetWeightLb ?? 50;
 
   const weightLb =
     data?.weightLb ?? null;
@@ -1380,30 +1046,14 @@ const [data, setData] =
     data?.detectorState ??
     'UNKNOWN';
 
-  /*
-   * DEMO conserva el FSM simulado.
-   *
-   * PRODUCCIÓN usa un estado de presentación
-   * independiente del detector V1 shadow.
-   */
-  const processState =
-    demoMode
-      ? detectorState
-      : uiProcessState;
-
   const activeScaleLabel =
-    demoMode
-      ? detectorState ===
-          'TRACKING_BAG'
-        ? 'Llenando'
-        : detectorState ===
-            'REMOVAL_CONFIRM'
-          ? 'Retiro'
-          : 'En espera'
-      : uiProcessState ===
-          'BAG_CONFIRMED'
-        ? 'Saco registrado'
-        : 'Peso en vivo';
+    detectorState ===
+      'TRACKING_BAG'
+      ? 'Llenando'
+      : detectorState ===
+          'REMOVAL_CONFIRM'
+        ? 'Retiro'
+        : 'En espera';
 
   if (!authorized) {
     return (
@@ -1553,16 +1203,6 @@ const [data, setData] =
         </Alert>
       )}
 
-      {productionError &&
-        !demoMode && (
-          <Alert
-            severity="warning"
-            sx={{ mb: 2 }}
-          >
-            {productionError}
-          </Alert>
-        )}
-
       {stale &&
         !connectionError && (
           <Alert
@@ -1595,7 +1235,7 @@ const [data, setData] =
           weightLb={weightLb}
           targetLb={targetLb}
           detectorState={
-            processState
+            detectorState
           }
           online={online}
           progress={progress}
@@ -1624,20 +1264,14 @@ const [data, setData] =
             value={
               demoMode
                 ? '18'
-                : production
-                  ? String(production.bagsToday)
-                  : '—'
+                : '—'
             }
             caption={
               demoMode
                 ? 'DEMO · datos simulados'
-                : productionError
-                  ? 'Histórico no disponible'
-                  : lastBag
+                : lastBag
                     ? `Último saco en vivo · ${lastBag.weightLb.toFixed(2)} lb`
-                    : production
-                      ? 'Histórico del día · realtime activo'
-                      : 'Cargando histórico...'
+                    : 'Histórico pendiente · realtime activo'
             }
           />
 
@@ -1649,19 +1283,13 @@ const [data, setData] =
             value={
               demoMode
                 ? '50.02'
-                : production?.averageWeightLb != null
-                  ? production.averageWeightLb.toFixed(2)
-                  : '—'
+                : '—'
             }
             unit="lb"
             caption={
               demoMode
                 ? 'DEMO · últimos 18 sacos'
-                : production
-                  ? 'Promedio de sacos de hoy'
-                  : productionError
-                    ? 'Histórico no disponible'
-                    : 'Cargando histórico...'
+                : 'Pendiente bag_events'
             }
           />
 
@@ -1673,19 +1301,13 @@ const [data, setData] =
             value={
               demoMode
                 ? '900.4'
-                : production
-                  ? production.totalWeightLb.toFixed(1)
-                  : '—'
+                : '—'
             }
             unit="lb"
             caption={
               demoMode
                 ? 'DEMO · peso total'
-                : production
-                  ? 'Producción acumulada de hoy'
-                  : productionError
-                    ? 'Histórico no disponible'
-                    : 'Cargando histórico...'
+                : 'Pendiente bag_events'
             }
           />
 
@@ -2093,15 +1715,11 @@ const [data, setData] =
             : '—'}
           {' · '}
           Estado:{' '}
-            {data
-              ? demoMode
-                ? detectorLabel(
-                    data.detectorState
-                  )
-                : processStateLabel(
-                    uiProcessState
-                  )
-              : 'Esperando datos'}
+          {data
+            ? detectorLabel(
+                data.detectorState
+              )
+            : 'Esperando datos'}
         </Typography>
       </Stack>
     </Box>
