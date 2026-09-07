@@ -2,3 +2,11 @@
 .env.*
 !.env.example
 *.tsbuildinfo
+*.bak
+*.bak-*
+*.before-*
+*.pre-*
+*.orig
+*.realtime-build
+*.prod-reference
+NO-USAR.*
