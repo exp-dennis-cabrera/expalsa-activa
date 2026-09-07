@@ -11,6 +11,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManagerFactory;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.URLEncoder;
@@ -40,6 +41,17 @@ public class OtDataServiceClient {
 
     private static final Duration REQUEST_TIMEOUT =
             Duration.ofSeconds(10);
+
+    /*
+     * Tope duro del cuerpo de respuesta.
+     *
+     * El dashboard OT real pesa unos pocos KB.
+     * Un servicio comprometido o en falla no puede
+     * forzarnos a materializar una respuesta enorme
+     * en el heap del backend.
+     */
+    private static final int MAX_RESPONSE_BYTES =
+            1024 * 1024;
 
     private final ObjectMapper objectMapper;
 
@@ -140,7 +152,7 @@ public class OtDataServiceClient {
             String token =
                     getAccessToken(false);
 
-            HttpResponse<String> response =
+            TextResponse response =
                     sendDashboardRequest(
                             assetKey,
                             token
@@ -250,7 +262,7 @@ public class OtDataServiceClient {
         }
     }
 
-    private HttpResponse<String> sendDashboardRequest(
+    private TextResponse sendDashboardRequest(
             final String assetKey,
             final String accessToken
     ) throws Exception {
@@ -289,9 +301,83 @@ public class OtDataServiceClient {
                         .GET()
                         .build();
 
-        return httpClient.send(
-                request,
-                HttpResponse.BodyHandlers.ofString()
+        return sendBounded(request);
+    }
+
+    /**
+     * Envía la petición y materializa el cuerpo como texto
+     * solo hasta {@link #MAX_RESPONSE_BYTES}.
+     *
+     * Se lee en streaming: si el servicio OT excede el tope
+     * se aborta y se cierra la conexión, sin cargar el resto.
+     */
+    private TextResponse sendBounded(
+            final HttpRequest request
+    ) throws Exception {
+
+        HttpResponse<InputStream> response =
+                httpClient.send(
+                        request,
+                        HttpResponse.BodyHandlers.ofInputStream()
+                );
+
+        long declaredLength =
+                response.headers()
+                        .firstValueAsLong("Content-Length")
+                        .orElse(-1L);
+
+        try (InputStream body = response.body()) {
+
+            if (declaredLength > MAX_RESPONSE_BYTES) {
+                throw tooLarge(declaredLength);
+            }
+
+            return new TextResponse(
+                    response.statusCode(),
+                    readBounded(body)
+            );
+        }
+    }
+
+    private static String readBounded(
+            final InputStream input
+    ) throws Exception {
+
+        ByteArrayOutputStream buffer =
+                new ByteArrayOutputStream();
+
+        byte[] chunk = new byte[8192];
+
+        long total = 0;
+        int read;
+
+        while ((read = input.read(chunk)) != -1) {
+
+            total += read;
+
+            if (total > MAX_RESPONSE_BYTES) {
+                throw tooLarge(total);
+            }
+
+            buffer.write(chunk, 0, read);
+        }
+
+        return buffer.toString(StandardCharsets.UTF_8);
+    }
+
+    private static ResponseStatusException tooLarge(
+            final long bytes
+    ) {
+
+        log.error(
+                "OT Data Service respuesta excede el limite bytes>={} max={}",
+                bytes,
+                MAX_RESPONSE_BYTES
+        );
+
+        return new ResponseStatusException(
+                HttpStatus.BAD_GATEWAY,
+                "Respuesta OT demasiado grande"
         );
     }
 
@@ -359,11 +445,8 @@ public class OtDataServiceClient {
                             )
                             .build();
 
-            HttpResponse<String> response =
-                    httpClient.send(
-                            request,
-                            HttpResponse.BodyHandlers.ofString()
-                    );
+            TextResponse response =
+                    sendBounded(request);
 
             if (response.statusCode() != 200) {
 
@@ -596,6 +679,13 @@ public class OtDataServiceClient {
     private record CachedToken(
             String accessToken,
             long refreshAtEpochSecond
+    ) {
+    }
+
+    /** Respuesta HTTP ya acotada a {@link #MAX_RESPONSE_BYTES}. */
+    private record TextResponse(
+            int statusCode,
+            String body
     ) {
     }
 }
